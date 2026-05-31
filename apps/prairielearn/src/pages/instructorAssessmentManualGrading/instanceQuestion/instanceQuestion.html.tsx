@@ -2,19 +2,20 @@ import { z } from 'zod';
 
 import { EncodedData } from '@prairielearn/browser-utils';
 import { formatDateYMDHM } from '@prairielearn/formatter';
-import { html, unsafeHtml } from '@prairielearn/html';
+import { html } from '@prairielearn/html';
 import { hydrateHtml } from '@prairielearn/react/server';
 
 import { InstructorInfoPanel } from '../../../components/InstructorInfoPanel.js';
 import { PageLayout } from '../../../components/PageLayout.js';
 import { PersonalNotesPanel } from '../../../components/PersonalNotesPanel.js';
 import { QuestionContainer } from '../../../components/QuestionContainer.js';
+import { QuestionHeadContents } from '../../../components/QuestionHeadContents.js';
 import { RubricSettings } from '../../../components/RubricSettings.js';
 import type {
   AiGradingGeneralStats,
   InstanceQuestionAIGradingInfo,
 } from '../../../ee/lib/ai-grading/types.js';
-import { assetPath, compiledScriptTag, nodeModulesAssetPath } from '../../../lib/assets.js';
+import { compiledScriptTag } from '../../../lib/assets.js';
 import { StaffAssessmentQuestionSchema } from '../../../lib/client/safe-db-types.js';
 import { GradingJobSchema, type InstanceQuestionGroup, type User } from '../../../lib/db-types.js';
 import type { ResLocalsInstanceQuestionRender } from '../../../lib/question-render.types.js';
@@ -94,24 +95,12 @@ export function InstanceQuestion({
       pageNote: `Instance - question ${resLocals.instance_question_info.instructor_question_number}`,
     },
     headContent: html`
-      <meta
-        name="mathjax-fonts-path"
-        content="${nodeModulesAssetPath('@mathjax/mathjax-newcm-font')}"
-      />
-      ${compiledScriptTag('question.ts')}
-      <script defer src="${nodeModulesAssetPath('mathjax/tex-svg.js')}"></script>
-      <script>
-        document.urlPrefix = '${resLocals.urlPrefix}';
-      </script>
-      ${resLocals.question.type !== 'Freeform'
-        ? html`
-            <script src="${assetPath('javascripts/lodash.min.js')}"></script>
-            <script src="${assetPath('javascripts/require.js')}"></script>
-            <script src="${assetPath('localscripts/question.js')}"></script>
-            <script src="${assetPath('localscripts/questionCalculation.js')}"></script>
-          `
-        : ''}
-      ${unsafeHtml(resLocals.extraHeadersHtml)}
+      ${QuestionHeadContents({
+        extraHeadersHtml: resLocals.extraHeadersHtml,
+        legacyScriptSource: 'public',
+        questionType: resLocals.question.type,
+        urlPrefix: resLocals.urlPrefix,
+      })}
       ${compiledScriptTag('instructorAssessmentManualGradingInstanceQuestion.js')}
       ${EncodedData(
         {
