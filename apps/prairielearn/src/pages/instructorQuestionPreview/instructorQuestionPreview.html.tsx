@@ -4,13 +4,12 @@ import { html, unsafeHtml } from '@prairielearn/html';
 
 import {
   CalculatorDrawer,
-  CalculatorDrawerHeadScripts,
   CalculatorDrawerToggle,
 } from '../../components/CalculatorDrawer.js';
 import { InstructorInfoPanel } from '../../components/InstructorInfoPanel.js';
 import { PageLayout } from '../../components/PageLayout.js';
+import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { QuestionContainer } from '../../components/QuestionContainer.js';
-import { assetPath, compiledScriptTag, nodeModulesAssetPath } from '../../lib/assets.js';
 import { type CopyTarget } from '../../lib/copy-content.js';
 import type { ResLocalsQuestionRender } from '../../lib/question-render.types.js';
 import type { ResLocalsForPage } from '../../lib/res-locals.js';
@@ -48,24 +47,12 @@ export function InstructorQuestionPreview({
       pageNote: resLocals.question.qid,
     },
     headContent: html`
-      <meta
-        name="mathjax-fonts-path"
-        content="${nodeModulesAssetPath('@mathjax/mathjax-newcm-font')}"
-      />
-      ${compiledScriptTag('question.ts')} ${CalculatorDrawerHeadScripts()}
-      <script defer src="${nodeModulesAssetPath('mathjax/tex-svg.js')}"></script>
-      <script>
-        document.urlPrefix = '${resLocals.urlPrefix}';
-      </script>
-      ${resLocals.question.type !== 'Freeform'
-        ? html`
-            <script src="${nodeModulesAssetPath('lodash/lodash.min.js')}"></script>
-            <script src="${assetPath('javascripts/require.js')}"></script>
-            <script src="${assetPath('localscripts/question.js')}"></script>
-            <script src="${assetPath('localscripts/questionCalculation.js')}"></script>
-          `
-        : ''}
-      ${unsafeHtml(resLocals.extraHeadersHtml)}
+      ${QuestionHeadContents({
+        extraHeadersHtml: resLocals.extraHeadersHtml,
+        includeCalculator: true,
+        questionType: resLocals.question.type,
+        urlPrefix: resLocals.urlPrefix,
+      })}
       <style>
         .markdown-body :last-child {
           margin-bottom: 0;
