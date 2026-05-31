@@ -1,5 +1,5 @@
 import { EncodedData } from '@prairielearn/browser-utils';
-import { html, unsafeHtml } from '@prairielearn/html';
+import { html } from '@prairielearn/html';
 
 import {
   RegenerateInstanceAlert,
@@ -8,16 +8,16 @@ import {
 import { AssessmentScorePanel } from '../../components/AssessmentScorePanel.js';
 import {
   CalculatorDrawer,
-  CalculatorDrawerHeadScripts,
   CalculatorDrawerToggle,
 } from '../../components/CalculatorDrawer.js';
 import { InstructorInfoPanel } from '../../components/InstructorInfoPanel.js';
 import { PageLayout } from '../../components/PageLayout.js';
 import { PersonalNotesPanel } from '../../components/PersonalNotesPanel.js';
 import { QuestionContainer, QuestionTitle } from '../../components/QuestionContainer.js';
+import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { QuestionNavSideGroup } from '../../components/QuestionNavigation.js';
 import { QuestionScorePanel } from '../../components/QuestionScore.js';
-import { assetPath, compiledScriptTag, nodeModulesAssetPath } from '../../lib/assets.js';
+import { compiledScriptTag } from '../../lib/assets.js';
 import { type CopyTarget } from '../../lib/copy-content.js';
 import type { AssessmentTool, User } from '../../lib/db-types.js';
 import { getRoleNamesForUser } from '../../lib/groups.shared.js';
@@ -55,45 +55,31 @@ export function StudentInstanceQuestion({
       page: 'assessment_instance',
     },
     headContent: html`
-      <meta
-        name="mathjax-fonts-path"
-        content="${nodeModulesAssetPath('@mathjax/mathjax-newcm-font')}"
-      />
-      ${compiledScriptTag('question.ts')} ${hasCalculator ? CalculatorDrawerHeadScripts() : ''}
-      ${resLocals.assessment.type === 'Exam'
-        ? html`
-            ${compiledScriptTag('examTimeLimitCountdown.ts')}
-            ${EncodedData(
-              {
-                serverRemainingMS: resLocals.assessment_instance_remaining_ms,
-                serverTimeLimitMS: resLocals.assessment_instance_time_limit_ms,
-                serverUpdateURL: `${resLocals.urlPrefix}/assessment_instance/${resLocals.assessment_instance.id}/time_remaining`,
-                canTriggerFinish: resLocals.authz_result.authorized_edit,
-                showsTimeoutWarning: true,
-                reloadOnFail: true,
-                csrfToken: resLocals.__csrf_token,
-              },
-              'time-limit-data',
-            )}
-          `
-        : ''}
-      <script defer src="${nodeModulesAssetPath('mathjax/tex-svg.js')}"></script>
-      <script>
-        document.urlPrefix = '${resLocals.urlPrefix}';
-      </script>
-      ${renderState?.variant == null
-        ? ''
-        : html`
-            ${resLocals.question.type !== 'Freeform'
-              ? html`
-                  <script src="${nodeModulesAssetPath('lodash/lodash.min.js')}"></script>
-                  <script src="${assetPath('javascripts/require.js')}"></script>
-                  <script src="${assetPath('localscripts/question.js')}"></script>
-                  <script src="${assetPath('localscripts/questionCalculation.js')}"></script>
-                `
-              : ''}
-            ${unsafeHtml(renderState.extraHeadersHtml)}
-          `}
+      ${QuestionHeadContents({
+        afterQuestionScriptHtml:
+          resLocals.assessment.type === 'Exam'
+            ? html`
+                ${compiledScriptTag('examTimeLimitCountdown.ts')}
+                ${EncodedData(
+                  {
+                    serverRemainingMS: resLocals.assessment_instance_remaining_ms,
+                    serverTimeLimitMS: resLocals.assessment_instance_time_limit_ms,
+                    serverUpdateURL: `${resLocals.urlPrefix}/assessment_instance/${resLocals.assessment_instance.id}/time_remaining`,
+                    canTriggerFinish: resLocals.authz_result.authorized_edit,
+                    showsTimeoutWarning: true,
+                    reloadOnFail: true,
+                    csrfToken: resLocals.__csrf_token,
+                  },
+                  'time-limit-data',
+                )}
+              `
+            : '',
+        extraHeadersHtml: renderState?.variant == null ? null : renderState.extraHeadersHtml,
+        includeCalculator: hasCalculator,
+        includeLegacyQuestionScripts: renderState?.variant != null,
+        questionType: resLocals.question.type,
+        urlPrefix: resLocals.urlPrefix,
+      })}
     `,
     preContent: html`
       ${userCanDeleteAssessmentInstance
