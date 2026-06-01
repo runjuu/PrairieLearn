@@ -363,8 +363,23 @@ describe('question preview renderer helpers', () => {
       });
 
       assert.equal(success.ok, true);
+      assert.deepEqual(Object.keys(success.payload).sort(), ['bodyHtml', 'headHtml', 'variant']);
       assert.match(success.payload.bodyHtml, /Startup scoped/);
       assert.match(success.payload.headHtml, /document\.urlPrefix = '\/startup-preview'/);
+      assert.match(success.payload.headHtml, /\/assets\//);
+      assert.notMatch(`${success.payload.headHtml}${success.payload.bodyHtml}`, /<!doctype/i);
+      assert.notMatch(`${success.payload.headHtml}${success.payload.bodyHtml}`, /<html/i);
+      assert.notMatch(`${success.payload.headHtml}${success.payload.bodyHtml}`, /<body/i);
+      assert.equal('assessment' in success.payload, false);
+      assert.equal('submission' in success.payload, false);
+      assert.equal('submittedAnswer' in success.payload, false);
+      assert.equal('savedAnswer' in success.payload, false);
+      assert.equal('answerHtml' in success.payload, false);
+      assert.equal('submissionHtmls' in success.payload, false);
+      assert.equal('correctAnswerHtml' in success.payload, false);
+      assert.equal('documentHtml' in success.payload, false);
+      assert.equal('port' in success.payload, false);
+      assert.equal('assetServer' in success.payload, false);
 
       const rejected: any = await runtime.render({
         courseDir: '/tmp/other-course',
