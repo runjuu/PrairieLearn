@@ -92,6 +92,7 @@ class LoadEstimator {
 
   _reportLoad() {
     debug(`LoadEstimator._reportLoad(): jobType = ${this.jobType}`);
+    if (config.reportIntervalSec <= 0) return;
     this._warnOldJobs();
     const params = {
       // The instance ID used in the `server_loads` table is not quite the same
