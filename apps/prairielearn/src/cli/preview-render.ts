@@ -15,8 +15,8 @@ import {
   type QuestionPreviewRuntimeRenderInput,
   type QuestionPreviewRuntimeOptions,
   type QuestionPreviewWorkersExecutionMode,
-} from './lib/question-preview-render.js';
-import { REPOSITORY_ROOT_PATH } from './lib/paths.js';
+} from '../lib/question-preview-render.js';
+import { REPOSITORY_ROOT_PATH } from '../lib/paths.js';
 
 const DEFAULT_QID = 'template/number-input/random';
 const DEFAULT_VARIANT_SEED = '1';

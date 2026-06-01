@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import minimist from 'minimist';
 
-import { REPOSITORY_ROOT_PATH } from './lib/paths.js';
+import { REPOSITORY_ROOT_PATH } from '../lib/paths.js';
 
 interface BenchmarkResponseSummary {
   durationMs: number;
