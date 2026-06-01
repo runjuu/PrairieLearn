@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable, Writable } from 'node:stream';
+import { PassThrough, Readable, Writable } from 'node:stream';
 
 import { assert, describe, it } from 'vitest';
 
@@ -22,26 +22,27 @@ async function writeQuestionFile(
   await fs.writeFile(path.join(questionDir, filename), contents);
 }
 
+async function writeQuestionInfo(courseDir: string, qid: string, info: Record<string, unknown>) {
+  await writeQuestionFile(courseDir, qid, 'info.json', JSON.stringify(info));
+}
+
 async function writeQuestion(courseDir: string, qid: string, title: string, uuid: string) {
-  await writeQuestionFile(
-    courseDir,
-    qid,
-    'info.json',
-    JSON.stringify({
-      title,
-      topic: 'Testing',
-      type: 'v3',
-      uuid,
-    }),
-  );
+  await writeQuestionInfo(courseDir, qid, {
+    title,
+    topic: 'Testing',
+    type: 'v3',
+    uuid,
+  });
   await writeQuestionFile(courseDir, qid, 'question.html', `<p>${title}</p>`);
 }
 
 class CollectingWritable extends Writable {
   chunks: Buffer[] = [];
+  private waiters: Array<{ count: number; resolve: () => void }> = [];
 
   _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
     this.chunks.push(Buffer.from(chunk));
+    this.flushWaiters();
     callback();
   }
 
@@ -51,6 +52,27 @@ class CollectingWritable extends Writable {
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line));
+  }
+
+  waitForLines(count: number) {
+    if (this.lines().length >= count) return Promise.resolve();
+
+    return new Promise<void>((resolve) => {
+      this.waiters.push({ count, resolve });
+    });
+  }
+
+  private flushWaiters() {
+    const lineCount = this.lines().length;
+    const pending: typeof this.waiters = [];
+    for (const waiter of this.waiters) {
+      if (lineCount >= waiter.count) {
+        waiter.resolve();
+      } else {
+        pending.push(waiter);
+      }
+    }
+    this.waiters = pending;
   }
 }
 
@@ -106,6 +128,103 @@ describe('preview-render serve mode', () => {
     assert.deepEqual(lines[2].id, ['second', 2]);
     assert.match(lines[2].payload.bodyHtml, /Warm second/);
     assert.equal(lines.length, 3);
+  });
+
+  it('renders current question files after mutations between warm requests', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'warm/mutable';
+    const info = {
+      title: 'Warm mutable',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111123',
+    };
+    await writeQuestionInfo(courseDir, qid, info);
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<p>Question HTML marker: first</p><p>Server marker: {{params.marker}}</p>',
+    );
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      'def generate(data):\n    data["params"]["marker"] = "server-first"\n',
+    );
+
+    const input = new PassThrough();
+    const output = new CollectingWritable();
+    const serving = serveQuestionPreview({
+      defaults: {
+        qid,
+        variantSeed: '1',
+      },
+      input,
+      output,
+      runtimeOptions: {
+        courseDir,
+        prewarmWorkers: true,
+        urlPrefix: '/warm-preview',
+        workersExecutionMode: 'native',
+      },
+    });
+
+    await output.waitForLines(1);
+
+    input.write(`${JSON.stringify({ id: 'initial', qid, variantSeed: '1' })}\n`);
+    await output.waitForLines(2);
+    let lines = output.lines();
+    assert.deepEqual(lines[0], { ok: true, type: 'ready' });
+    assert.equal(lines[1].type, 'response');
+    assert.equal(lines[1].ok, true);
+    assert.match(lines[1].payload.bodyHtml, /Question HTML marker: first/);
+    assert.match(lines[1].payload.bodyHtml, /Server marker: server-first/);
+
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<p>Question HTML marker: second</p><p>Server marker: {{params.marker}}</p>',
+    );
+    input.write(`${JSON.stringify({ id: 'question-html-updated', qid, variantSeed: '1' })}\n`);
+    await output.waitForLines(3);
+    lines = output.lines();
+    assert.equal(lines[2].type, 'response');
+    assert.equal(lines[2].ok, true);
+    assert.match(lines[2].payload.bodyHtml, /Question HTML marker: second/);
+    assert.notMatch(lines[2].payload.bodyHtml, /Question HTML marker: first/);
+    assert.match(lines[2].payload.bodyHtml, /Server marker: server-first/);
+
+    await writeQuestionInfo(courseDir, qid, {
+      ...info,
+      type: 'MultipleChoice',
+    });
+    input.write(`${JSON.stringify({ id: 'metadata-updated', qid, variantSeed: '1' })}\n`);
+    await output.waitForLines(4);
+    lines = output.lines();
+    assert.equal(lines[3].type, 'response');
+    assert.equal(lines[3].ok, false);
+    assert.match(lines[3].diagnostics[0].message, /Unsupported preview question type/);
+
+    await writeQuestionInfo(courseDir, qid, info);
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      'def generate(data):\n    data["params"]["marker"] = "server-second"\n',
+    );
+    input.write(`${JSON.stringify({ id: 'server-py-updated', qid, variantSeed: '1' })}\n`);
+    await output.waitForLines(5);
+    lines = output.lines();
+    assert.equal(lines[4].type, 'response');
+    assert.equal(lines[4].ok, true);
+    assert.match(lines[4].payload.bodyHtml, /Question HTML marker: second/);
+    assert.match(lines[4].payload.bodyHtml, /Server marker: server-second/);
+    assert.notMatch(lines[4].payload.bodyHtml, /Server marker: server-first/);
+
+    input.end();
+    await serving;
   });
 
   it('rejects startup-scoped fields in warm render requests', async () => {
