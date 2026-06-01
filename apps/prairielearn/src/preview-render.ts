@@ -2,6 +2,7 @@
 
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 
 import minimist from 'minimist';
 
@@ -10,9 +11,9 @@ import {
   renderQuestionPreview,
   type QuestionPreviewCacheType,
   type QuestionPreviewDiagnostic,
+  type QuestionPreviewPayload,
   type QuestionPreviewRuntimeRenderInput,
   type QuestionPreviewRuntimeOptions,
-  type QuestionPreviewResult,
   type QuestionPreviewWorkersExecutionMode,
 } from './lib/question-preview-render.js';
 import { REPOSITORY_ROOT_PATH } from './lib/paths.js';
@@ -142,18 +143,30 @@ interface ServeRequest {
   input: QuestionPreviewRuntimeRenderInput;
 }
 
+class ServeRequestError extends Error {
+  id?: unknown;
+
+  constructor(message: string, { id }: { id?: unknown } = {}) {
+    super(message);
+    this.id = id;
+  }
+}
+
 type ServeResponse =
   | {
+      diagnostics: QuestionPreviewDiagnostic[];
       durationMs: number;
       id?: unknown;
       ok: true;
-      result: QuestionPreviewResult;
+      payload: QuestionPreviewPayload;
+      type: 'response';
     }
   | {
+      diagnostics: QuestionPreviewDiagnostic[];
       durationMs: number;
-      error: QuestionPreviewDiagnostic;
       id?: unknown;
       ok: false;
+      type: 'response';
     };
 
 function parseServeRequest(
@@ -171,6 +184,7 @@ function parseServeRequest(
     throw new Error('Invalid request line. Expected a JSON object.');
   }
 
+  const id = parsed.id;
   const startupScopedFields = [
     'cacheType',
     'cache-type',
@@ -190,13 +204,14 @@ function parseServeRequest(
     'workers-execution-mode',
   ].filter((field) => parsed[field] != null);
   if (startupScopedFields.length > 0) {
-    throw new Error(
+    throw new ServeRequestError(
       `Render requests cannot override startup-scoped preview configuration: ${startupScopedFields.join(', ')}.`,
+      { id },
     );
   }
 
   return {
-    id: parsed.id,
+    id,
     input: {
       qid: stringField(parsed, 'qid') ?? defaults.qid,
       variantSeed: stringField(parsed, 'variantSeed', ['variant-seed']) ?? defaults.variantSeed,
@@ -204,22 +219,26 @@ function parseServeRequest(
   };
 }
 
-function writeJsonLine(value: unknown) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
+function writeJsonLine(output: NodeJS.WritableStream, value: unknown) {
+  output.write(`${JSON.stringify(value)}\n`);
 }
 
-async function serveQuestionPreview({
+export async function serveQuestionPreview({
   defaults,
+  input = process.stdin,
+  output = process.stdout,
   runtimeOptions,
 }: {
   defaults: QuestionPreviewRuntimeRenderInput;
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
   runtimeOptions: QuestionPreviewRuntimeOptions;
 }) {
   const runtime = await createQuestionPreviewRuntime(runtimeOptions);
-  writeJsonLine({ ok: true, ready: true });
+  writeJsonLine(output, { ok: true, type: 'ready' });
   const lines = createInterface({
     crlfDelay: Infinity,
-    input: process.stdin,
+    input,
     terminal: false,
   });
 
@@ -233,18 +252,36 @@ async function serveQuestionPreview({
         id = request.id;
 
         const result = await runtime.render(request.input);
-        writeJsonLine({
+        const baseResponse = {
+          diagnostics: result.diagnostics,
           durationMs: performance.now() - startedAt,
           id,
-          ok: true,
-          result,
-        } satisfies ServeResponse);
+          type: 'response',
+        } as const;
+        writeJsonLine(
+          output,
+          result.ok
+            ? ({
+                ...baseResponse,
+                ok: true,
+                payload: result.payload,
+              } satisfies ServeResponse)
+            : ({
+                ...baseResponse,
+                ok: false,
+              } satisfies ServeResponse),
+        );
       } catch (err) {
-        writeJsonLine({
+        if (err instanceof ServeRequestError) {
+          id = err.id;
+        }
+
+        writeJsonLine(output, {
+          diagnostics: [diagnosticFromError(err)],
           durationMs: performance.now() - startedAt,
-          error: diagnosticFromError(err),
           id,
           ok: false,
+          type: 'response',
         } satisfies ServeResponse);
       }
     }
@@ -349,7 +386,9 @@ async function main() {
   console.log(JSON.stringify(result));
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
