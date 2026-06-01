@@ -52,11 +52,14 @@ export interface QuestionPreviewRuntime {
 
 export interface QuestionPreviewDiagnostic {
   data?: unknown;
-  fatal?: boolean;
+  fatal: boolean;
   message: string;
   name: string;
+  phase?: QuestionPreviewPhase;
   stack?: string;
 }
+
+type QuestionPreviewPhase = 'input' | 'metadata' | 'generate' | 'prepare' | 'render';
 
 export interface QuestionPreviewPayload {
   bodyHtml: string;
@@ -72,7 +75,24 @@ export interface QuestionPreviewSuccessEnvelope {
   payload: QuestionPreviewPayload;
 }
 
-export type QuestionPreviewResult = QuestionPreviewSuccessEnvelope;
+export interface QuestionPreviewFailureEnvelope {
+  diagnostics: QuestionPreviewDiagnostic[];
+  ok: false;
+}
+
+export type QuestionPreviewResult = QuestionPreviewFailureEnvelope | QuestionPreviewSuccessEnvelope;
+
+class ExpectedQuestionPreviewError extends Error {
+  data?: unknown;
+  fatal = true;
+  phase: QuestionPreviewPhase;
+
+  constructor(message: string, { data, phase }: { data?: unknown; phase: QuestionPreviewPhase }) {
+    super(message);
+    this.data = data;
+    this.phase = phase;
+  }
+}
 
 function normalizeExternalEntrypoint(entrypoint: string | string[] | undefined): string | null {
   if (entrypoint == null) return null;
@@ -238,14 +258,73 @@ export function makePreviewLocals(urlPrefix: string): questionServers.QuestionRe
 
 export function diagnosticsFromIssues(
   issues: (Error & { fatal?: boolean; data?: unknown })[],
+  phase?: QuestionPreviewPhase,
+  { sanitizePaths = [] }: { sanitizePaths?: string[] } = {},
 ): QuestionPreviewDiagnostic[] {
   return issues.map((issue) => ({
-    data: issue.data,
-    fatal: issue.fatal,
-    message: issue.message,
+    data: sanitizeDiagnosticValue(issue.data, sanitizePaths),
+    fatal: issue.fatal ?? false,
+    message: sanitizeDiagnosticText(issue.message, sanitizePaths),
     name: issue.name,
-    stack: issue.stack,
+    phase,
   }));
+}
+
+function sanitizeDiagnosticText(text: string, sanitizePaths: string[]): string {
+  return sanitizePaths.reduce((result, unsafePath) => {
+    if (unsafePath.length === 0) return result;
+    return result.split(unsafePath).join('<course>');
+  }, text);
+}
+
+function sanitizeDiagnosticValue(value: unknown, sanitizePaths: string[]): unknown {
+  if (typeof value === 'string') return sanitizeDiagnosticText(value, sanitizePaths);
+  if (Array.isArray(value))
+    return value.map((item) => sanitizeDiagnosticValue(item, sanitizePaths));
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        sanitizeDiagnosticValue(item, sanitizePaths),
+      ]),
+    );
+  }
+
+  return value;
+}
+
+function diagnosticFromError(
+  err: unknown,
+  { phase }: { phase: QuestionPreviewPhase },
+): QuestionPreviewDiagnostic {
+  if (err instanceof Error) {
+    const errorPhase = 'phase' in err && isQuestionPreviewPhase(err.phase) ? err.phase : phase;
+
+    return {
+      data: 'data' in err ? err.data : undefined,
+      fatal: 'fatal' in err && typeof err.fatal === 'boolean' ? err.fatal : true,
+      message: err.message,
+      name: err.name,
+      phase: errorPhase,
+    };
+  }
+
+  return {
+    fatal: true,
+    message: String(err),
+    name: 'Error',
+    phase,
+  };
+}
+
+function isQuestionPreviewPhase(value: unknown): value is QuestionPreviewPhase {
+  return (
+    value === 'input' ||
+    value === 'metadata' ||
+    value === 'generate' ||
+    value === 'prepare' ||
+    value === 'render'
+  );
 }
 
 export function renderQuestionPreviewShellHeadHtml({
@@ -316,10 +395,82 @@ export function makeQuestionPreviewSuccessEnvelope({
   };
 }
 
+function makeQuestionPreviewFailureEnvelope(
+  diagnostics: QuestionPreviewDiagnostic[],
+): QuestionPreviewFailureEnvelope {
+  return {
+    diagnostics,
+    ok: false,
+  };
+}
+
+function validateQuestionPreviewQid(qid: string) {
+  const segments = qid.split('/');
+
+  if (
+    qid.length === 0 ||
+    qid.startsWith('/') ||
+    qid.includes('\0') ||
+    segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+  ) {
+    throw new ExpectedQuestionPreviewError(
+      'Invalid question id. Expected a relative qid below the course questions directory.',
+      {
+        data: { qid },
+        phase: 'input',
+      },
+    );
+  }
+}
+
+function validateQuestionPreviewVariantSeed(variantSeed: string) {
+  if (variantSeed.length === 0 || Number.isNaN(Number.parseInt(variantSeed, 36))) {
+    throw new ExpectedQuestionPreviewError(
+      'Invalid variant seed. Expected a non-empty seed with a base-36 prefix.',
+      {
+        data: { variantSeed },
+        phase: 'input',
+      },
+    );
+  }
+}
+
 async function readQuestionInfo(courseDir: string, qid: string): Promise<QuestionJson> {
   const infoPath = path.join(courseDir, 'questions', qid, 'info.json');
-  const rawInfo = JSON.parse(await fs.readFile(infoPath, 'utf8'));
-  return QuestionJsonSchema.parse(rawInfo);
+  let contents: string;
+
+  try {
+    contents = await fs.readFile(infoPath, 'utf8');
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
+      throw new ExpectedQuestionPreviewError(`Question "${qid}" is missing info.json.`, {
+        data: { qid },
+        phase: 'metadata',
+      });
+    }
+
+    throw err;
+  }
+
+  let rawInfo: unknown;
+  try {
+    rawInfo = JSON.parse(contents);
+  } catch {
+    throw new ExpectedQuestionPreviewError(`Question "${qid}" has invalid info.json JSON.`, {
+      data: { qid },
+      phase: 'metadata',
+    });
+  }
+
+  const parsed = QuestionJsonSchema.safeParse(rawInfo);
+  if (!parsed.success) {
+    throw new ExpectedQuestionPreviewError(`Question "${qid}" has invalid info.json metadata.`, {
+      data: { issues: parsed.error.issues, qid },
+      phase: 'metadata',
+    });
+  }
+
+  return parsed.data;
 }
 
 async function initPrairieLearnForQuestionPreview({
@@ -366,71 +517,118 @@ async function renderQuestionPreviewInRuntime({
   urlPrefix: string;
   workersExecutionMode: QuestionPreviewWorkersExecutionMode;
 }): Promise<QuestionPreviewResult> {
-  const resolvedCourseDir = path.resolve(courseDir);
-  const info = await readQuestionInfo(resolvedCourseDir, qid);
-  const course = makePreviewCourse(resolvedCourseDir);
-  const question = makePreviewQuestion(qid, info);
+  let phase: QuestionPreviewPhase = 'input';
 
-  if (question.type !== 'Freeform') {
-    throw new Error(`Unsupported preview question type: ${question.type ?? 'null'}`);
+  try {
+    validateQuestionPreviewQid(qid);
+    validateQuestionPreviewVariantSeed(variantSeed);
+
+    phase = 'metadata';
+    const resolvedCourseDir = path.resolve(courseDir);
+    const info = await readQuestionInfo(resolvedCourseDir, qid);
+    const course = makePreviewCourse(resolvedCourseDir);
+    const question = makePreviewQuestion(qid, info);
+
+    if (question.type !== 'Freeform') {
+      throw new ExpectedQuestionPreviewError(
+        `Unsupported preview question type: ${question.type ?? 'null'}. Only v3/Freeform questions can be rendered by the preview CLI.`,
+        {
+          data: { qid, questionType: question.type },
+          phase: 'metadata',
+        },
+      );
+    }
+
+    const questionServer = questionServers.getModule(question.type);
+    const preferences: Record<string, string | number | boolean> = {};
+
+    phase = 'generate';
+    const generateResult = await questionServer.generate(
+      question,
+      course,
+      variantSeed,
+      preferences,
+    );
+    const generateIssues = generateResult.courseIssues;
+    const sanitizePaths = [resolvedCourseDir];
+    const generateDiagnostics = diagnosticsFromIssues(generateIssues, 'generate', {
+      sanitizePaths,
+    });
+    if (generateIssues.some((issue) => issue.fatal)) {
+      return makeQuestionPreviewFailureEnvelope(generateDiagnostics);
+    }
+    const generatedVariant = {
+      broken: false,
+      options: generateResult.data.options ?? {},
+      params: generateResult.data.params ?? {},
+      preferences,
+      true_answer: generateResult.data.true_answer ?? {},
+      variant_seed: variantSeed,
+    };
+
+    phase = 'prepare';
+    const prepareResult = await questionServer.prepare(question, course, generatedVariant);
+    const prepareIssues = prepareResult.courseIssues;
+    const prepareDiagnostics = diagnosticsFromIssues(prepareIssues, 'prepare', {
+      sanitizePaths,
+    });
+    if (prepareIssues.some((issue) => issue.fatal)) {
+      return makeQuestionPreviewFailureEnvelope([...generateDiagnostics, ...prepareDiagnostics]);
+    }
+    const preparedVariant = makePreviewVariant(variantSeed, {
+      broken: false,
+      options: prepareResult.data.options ?? generatedVariant.options,
+      params: prepareResult.data.params ?? generatedVariant.params,
+      preferences,
+      true_answer: prepareResult.data.true_answer ?? generatedVariant.true_answer,
+    });
+
+    phase = 'render';
+    const renderResult = await questionServer.render({
+      course,
+      locals: makePreviewLocals(urlPrefix),
+      question,
+      renderSelection: { question: true },
+      submission: null,
+      submissions: [],
+      variant: preparedVariant,
+    });
+    const renderDiagnostics = diagnosticsFromIssues(renderResult.courseIssues, 'render', {
+      sanitizePaths,
+    });
+    if (renderResult.courseIssues.some((issue) => issue.fatal)) {
+      return makeQuestionPreviewFailureEnvelope([
+        ...generateDiagnostics,
+        ...prepareDiagnostics,
+        ...renderDiagnostics,
+      ]);
+    }
+
+    const extraHeadersHtml = renderResult.data.extraHeadersHtml;
+    const shellHeadHtml = renderQuestionPreviewShellHeadHtml({
+      extraHeadersHtml,
+      questionType: question.type,
+      urlPrefix,
+    });
+    const bodyHtml = renderQuestionPreviewBodyHtml({
+      question,
+      questionHtml: renderResult.data.questionHtml,
+      variant: preparedVariant,
+      variantToken: generateSignedToken(
+        { variantId: preparedVariant.id.toString() },
+        config.secretKey,
+      ),
+    });
+
+    return makeQuestionPreviewSuccessEnvelope({
+      bodyHtml,
+      diagnostics: [...generateDiagnostics, ...prepareDiagnostics, ...renderDiagnostics],
+      headHtml: shellHeadHtml,
+      variantSeed: preparedVariant.variant_seed,
+    });
+  } catch (err) {
+    return makeQuestionPreviewFailureEnvelope([diagnosticFromError(err, { phase })]);
   }
-
-  const questionServer = questionServers.getModule(question.type);
-  const preferences: Record<string, string | number | boolean> = {};
-
-  const generateResult = await questionServer.generate(question, course, variantSeed, preferences);
-  const generateIssues = generateResult.courseIssues;
-  const generatedVariant = {
-    broken: generateIssues.some((issue) => issue.fatal),
-    options: generateResult.data.options ?? {},
-    params: generateResult.data.params ?? {},
-    preferences,
-    true_answer: generateResult.data.true_answer ?? {},
-    variant_seed: variantSeed,
-  };
-
-  const prepareResult = generatedVariant.broken
-    ? null
-    : await questionServer.prepare(question, course, generatedVariant);
-  const prepareIssues = prepareResult?.courseIssues ?? [];
-  const allPreRenderIssues = [...generateIssues, ...prepareIssues];
-  const preparedVariant = makePreviewVariant(variantSeed, {
-    broken: allPreRenderIssues.some((issue) => issue.fatal),
-    options: prepareResult?.data.options ?? generatedVariant.options,
-    params: prepareResult?.data.params ?? generatedVariant.params,
-    preferences,
-    true_answer: prepareResult?.data.true_answer ?? generatedVariant.true_answer,
-  });
-
-  const renderResult = await questionServer.render({
-    course,
-    locals: makePreviewLocals(urlPrefix),
-    question,
-    renderSelection: { question: true },
-    submission: null,
-    submissions: [],
-    variant: preparedVariant,
-  });
-
-  const extraHeadersHtml = renderResult.data.extraHeadersHtml;
-  const shellHeadHtml = renderQuestionPreviewShellHeadHtml({
-    extraHeadersHtml,
-    questionType: question.type,
-    urlPrefix,
-  });
-  const bodyHtml = renderQuestionPreviewBodyHtml({
-    question,
-    questionHtml: renderResult.data.questionHtml,
-    variant: preparedVariant,
-    variantToken: generateSignedToken({ variantId: preparedVariant.id.toString() }, config.secretKey),
-  });
-
-  return makeQuestionPreviewSuccessEnvelope({
-    bodyHtml,
-    diagnostics: diagnosticsFromIssues([...allPreRenderIssues, ...renderResult.courseIssues]),
-    headHtml: shellHeadHtml,
-    variantSeed: preparedVariant.variant_seed,
-  });
 }
 
 class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
