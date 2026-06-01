@@ -28,21 +28,30 @@ const PREVIEW_USER_ID = '1';
 const DEFAULT_PREVIEW_URL_PREFIX = '/preview-render';
 
 export type QuestionPreviewWorkersExecutionMode = 'native' | 'container';
+export type QuestionPreviewCacheType = 'memory' | 'none' | 'redis';
 
-export interface QuestionPreviewInput {
+export interface QuestionPreviewRuntimeOptions {
+  cacheType?: QuestionPreviewCacheType;
   courseDir: string;
-  qid: string;
-  variantSeed?: string;
+  devMode?: boolean;
+  prewarmWorkers?: boolean;
+  questionTimeoutMilliseconds?: number;
   urlPrefix?: string;
+  workersCount?: number;
   workersExecutionMode?: QuestionPreviewWorkersExecutionMode;
 }
 
-export type QuestionPreviewRuntimeRenderInput = Omit<QuestionPreviewInput, 'workersExecutionMode'>;
+export interface QuestionPreviewRuntimeRenderInput {
+  qid: string;
+  variantSeed?: string;
+}
 
-export interface QuestionPreviewRuntimeOptions {
-  prewarmWorkers?: boolean;
-  urlPrefix?: string;
-  workersExecutionMode?: QuestionPreviewWorkersExecutionMode;
+export interface QuestionPreviewInput
+  extends QuestionPreviewRuntimeOptions, QuestionPreviewRuntimeRenderInput {}
+
+interface QuestionPreviewInternalRenderInput extends QuestionPreviewRuntimeRenderInput {
+  courseDir: string;
+  urlPrefix: string;
 }
 
 export interface QuestionPreviewRuntime {
@@ -474,21 +483,29 @@ async function readQuestionInfo(courseDir: string, qid: string): Promise<Questio
 }
 
 async function initPrairieLearnForQuestionPreview({
+  cacheType = 'none',
+  devMode = false,
   mode,
   prewarmWorkers = false,
+  questionTimeoutMilliseconds = 5000,
+  workersCount = 1,
 }: {
+  cacheType?: QuestionPreviewCacheType;
+  devMode?: boolean;
   mode: QuestionPreviewWorkersExecutionMode;
   prewarmWorkers?: boolean;
+  questionTimeoutMilliseconds?: number;
+  workersCount?: number;
 }) {
   validateQuestionPreviewWorkersExecutionMode(mode);
 
-  config.cacheType = 'none';
+  config.cacheType = cacheType;
   config.chunksConsumer = false;
-  config.devMode = false;
+  config.devMode = devMode;
   config.ensureExecutorImageAtStartup = mode === 'container';
-  config.questionTimeoutMilliseconds = 5000;
+  config.questionTimeoutMilliseconds = questionTimeoutMilliseconds;
   config.reportIntervalSec = 0;
-  config.workersCount = 1;
+  config.workersCount = workersCount;
   config.workersExecutionMode = mode;
 
   await cache.init({
@@ -513,10 +530,7 @@ async function renderQuestionPreviewInRuntime({
   qid,
   urlPrefix,
   variantSeed = '1',
-}: QuestionPreviewRuntimeRenderInput & {
-  urlPrefix: string;
-  workersExecutionMode: QuestionPreviewWorkersExecutionMode;
-}): Promise<QuestionPreviewResult> {
+}: QuestionPreviewInternalRenderInput): Promise<QuestionPreviewResult> {
   let phase: QuestionPreviewPhase = 'input';
 
   try {
@@ -636,8 +650,8 @@ class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
   private closed = false;
 
   constructor(
+    private readonly courseDir: string,
     private readonly urlPrefix: string,
-    private readonly workersExecutionMode: QuestionPreviewWorkersExecutionMode,
   ) {}
 
   async render(input: QuestionPreviewRuntimeRenderInput): Promise<QuestionPreviewResult> {
@@ -645,10 +659,32 @@ class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
       throw new Error('Question preview runtime is already closed.');
     }
 
+    const processScopedFields = [
+      'cacheType',
+      'courseDir',
+      'devMode',
+      'prewarmWorkers',
+      'questionTimeoutMilliseconds',
+      'urlPrefix',
+      'workersCount',
+      'workersExecutionMode',
+    ].filter((field) => Object.hasOwn(input, field));
+    if (processScopedFields.length > 0) {
+      return makeQuestionPreviewFailureEnvelope([
+        {
+          data: { fields: processScopedFields },
+          fatal: true,
+          message: `Render requests cannot override startup-scoped preview configuration: ${processScopedFields.join(', ')}.`,
+          name: 'Error',
+          phase: 'input',
+        },
+      ]);
+    }
+
     return renderQuestionPreviewInRuntime({
       ...input,
-      urlPrefix: input.urlPrefix ?? this.urlPrefix,
-      workersExecutionMode: this.workersExecutionMode,
+      courseDir: this.courseDir,
+      urlPrefix: this.urlPrefix,
     });
   }
 
@@ -663,28 +699,46 @@ class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
 }
 
 export async function createQuestionPreviewRuntime({
+  cacheType = 'none',
+  courseDir,
+  devMode = false,
   prewarmWorkers = false,
+  questionTimeoutMilliseconds = 5000,
   urlPrefix = DEFAULT_PREVIEW_URL_PREFIX,
+  workersCount = 1,
   workersExecutionMode = 'native',
-}: QuestionPreviewRuntimeOptions = {}): Promise<QuestionPreviewRuntime> {
+}: QuestionPreviewRuntimeOptions): Promise<QuestionPreviewRuntime> {
   validateQuestionPreviewWorkersExecutionMode(workersExecutionMode);
   await initPrairieLearnForQuestionPreview({
+    cacheType,
+    devMode,
     mode: workersExecutionMode,
     prewarmWorkers,
+    questionTimeoutMilliseconds,
+    workersCount,
   });
-  return new InitializedQuestionPreviewRuntime(urlPrefix, workersExecutionMode);
+  return new InitializedQuestionPreviewRuntime(path.resolve(courseDir), urlPrefix);
 }
 
 export async function renderQuestionPreview(
   input: QuestionPreviewInput,
 ): Promise<QuestionPreviewResult> {
   const runtime = await createQuestionPreviewRuntime({
+    cacheType: input.cacheType,
+    courseDir: input.courseDir,
+    devMode: input.devMode,
+    prewarmWorkers: input.prewarmWorkers,
+    questionTimeoutMilliseconds: input.questionTimeoutMilliseconds,
     urlPrefix: input.urlPrefix,
+    workersCount: input.workersCount,
     workersExecutionMode: input.workersExecutionMode,
   });
 
   try {
-    return await runtime.render(input);
+    return await runtime.render({
+      qid: input.qid,
+      variantSeed: input.variantSeed,
+    });
   } finally {
     await runtime.close();
   }

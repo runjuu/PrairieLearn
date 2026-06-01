@@ -7,6 +7,7 @@ import { assert, describe, it } from 'vitest';
 import { QuestionJsonSchema } from '../schemas/index.js';
 
 import {
+  createQuestionPreviewRuntime,
   makeQuestionPreviewSuccessEnvelope,
   makePreviewLocals,
   makePreviewQuestion,
@@ -337,5 +338,48 @@ describe('question preview renderer helpers', () => {
     assert.equal(result.diagnostics[0].phase, 'generate');
     assert.match(result.diagnostics[0].message, /output logged on console/);
     assert.equal('stack' in result.diagnostics[0], false);
+  });
+
+  it('keeps courseDir and urlPrefix startup-scoped for initialized runtimes', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'startup/scoped', {
+      title: 'Startup scoped',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111116',
+    });
+    await writeQuestionFile(courseDir, 'startup/scoped', 'question.html', '<p>Startup scoped</p>');
+
+    const runtime = await createQuestionPreviewRuntime({
+      courseDir,
+      urlPrefix: '/startup-preview',
+      workersExecutionMode: 'native',
+    });
+
+    try {
+      const success: any = await runtime.render({
+        qid: 'startup/scoped',
+        variantSeed: '1',
+      });
+
+      assert.equal(success.ok, true);
+      assert.match(success.payload.bodyHtml, /Startup scoped/);
+      assert.match(success.payload.headHtml, /document\.urlPrefix = '\/startup-preview'/);
+
+      const rejected: any = await runtime.render({
+        courseDir: '/tmp/other-course',
+        qid: 'startup/scoped',
+        urlPrefix: '/other-preview',
+        variantSeed: '1',
+      } as any);
+
+      assert.equal(rejected.ok, false);
+      assert.equal('payload' in rejected, false);
+      assert.equal(rejected.diagnostics[0].fatal, true);
+      assert.equal(rejected.diagnostics[0].phase, 'input');
+      assert.match(rejected.diagnostics[0].message, /Render requests cannot override/);
+    } finally {
+      await runtime.close();
+    }
   });
 });
