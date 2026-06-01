@@ -154,6 +154,52 @@ describe('preview-render serve mode', () => {
     assert.equal(lines.length, 2);
   });
 
+  it('rejects non-render fields in warm render requests', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestion(
+      courseDir,
+      'warm/render-only',
+      'Warm render only',
+      '11111111-1111-4111-8111-111111111122',
+    );
+
+    const input = Readable.from([
+      `${JSON.stringify({
+        grade: true,
+        id: 'not-render-only',
+        port: 3000,
+        qid: 'warm/render-only',
+        submission: { answer: 'x' },
+      })}\n`,
+    ]);
+    const output = new CollectingWritable();
+
+    await serveQuestionPreview({
+      defaults: {
+        qid: 'warm/render-only',
+        variantSeed: '1',
+      },
+      input,
+      output,
+      runtimeOptions: {
+        courseDir,
+        prewarmWorkers: true,
+        urlPrefix: '/warm-preview',
+        workersExecutionMode: 'native',
+      },
+    });
+
+    const lines = output.lines();
+
+    assert.deepEqual(lines[0], { ok: true, type: 'ready' });
+    assert.equal(lines[1].type, 'response');
+    assert.equal(lines[1].ok, false);
+    assert.equal(lines[1].id, 'not-render-only');
+    assert.match(lines[1].diagnostics[0].message, /render-only/);
+    assert.equal('payload' in lines[1], false);
+    assert.equal(lines.length, 2);
+  });
+
   it('keeps serving after malformed JSON and expected preview failures', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestion(

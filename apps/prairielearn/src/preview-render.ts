@@ -40,6 +40,11 @@ Warm mode lifecycle:
   Requests are processed sequentially. Closing stdin shuts down the runtime.
   Hard wall-clock timeouts and process-tree termination are supervisor responsibilities.
 
+Render-only contract:
+  The CLI only renders question fragments and Stable Preview Variant seed metadata.
+  It does not parse, grade, accept submissions, render assessment panels, bind HTTP ports,
+  or serve PrairieLearn assets. Asset URLs in the payload must be served by the caller.
+
 Compatibility aliases:
   --courseDir, --variantSeed, --mode
 `;
@@ -214,6 +219,15 @@ function parseServeRequest(
     );
   }
 
+  const renderRequestFields = new Set(['id', 'qid', 'variantSeed', 'variant-seed']);
+  const unsupportedFields = Object.keys(parsed).filter((field) => !renderRequestFields.has(field));
+  if (unsupportedFields.length > 0) {
+    throw new ServeRequestError(
+      `Warm render requests are render-only and may only include id, qid, and variantSeed. Unsupported field(s): ${unsupportedFields.join(', ')}.`,
+      { id },
+    );
+  }
+
   return {
     id,
     input: {
@@ -322,6 +336,32 @@ async function main() {
 
   if (argv._.length > 0) {
     throw new Error(`Unexpected positional arguments: ${argv._.join(' ')}`);
+  }
+
+  const supportedFlags = new Set([
+    '_',
+    'cache-type',
+    'course-dir',
+    'courseDir',
+    'dev-mode',
+    'h',
+    'help',
+    'mode',
+    'prewarm-workers',
+    'qid',
+    'question-timeout-ms',
+    'serve',
+    'url-prefix',
+    'variant-seed',
+    'variantSeed',
+    'workers-count',
+    'workers-execution-mode',
+  ]);
+  const unsupportedFlags = Object.keys(argv).filter((flag) => !supportedFlags.has(flag));
+  if (unsupportedFlags.length > 0) {
+    throw new Error(
+      `Unsupported preview-render flag(s): ${unsupportedFlags.join(', ')}. The preview CLI is render-only and does not expose parse, grade, submission, saved-answer, answer-panel, submission-panel, correct-answer-panel, HTTP port, or asset-serving APIs.`,
+    );
   }
 
   const defaultCourseDir = path.resolve(REPOSITORY_ROOT_PATH, '..', 'exampleCourse');
