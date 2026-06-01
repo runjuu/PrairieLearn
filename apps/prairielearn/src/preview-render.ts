@@ -36,6 +36,10 @@ function usage() {
   --serve                             Warm runtime mode: JSON Lines over stdin/stdout
   -h, --help                          Display this help and exit
 
+Warm mode lifecycle:
+  Requests are processed sequentially. Closing stdin shuts down the runtime.
+  Hard wall-clock timeouts and process-tree termination are supervisor responsibilities.
+
 Compatibility aliases:
   --courseDir, --variantSeed, --mode
 `;

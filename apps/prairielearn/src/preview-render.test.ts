@@ -153,4 +153,84 @@ describe('preview-render serve mode', () => {
     assert.equal('result' in lines[1], false);
     assert.equal(lines.length, 2);
   });
+
+  it('keeps serving after malformed JSON and expected preview failures', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestion(
+      courseDir,
+      'warm/recovery',
+      'Warm recovery',
+      '11111111-1111-4111-8111-111111111120',
+    );
+
+    const input = Readable.from([
+      '{"id":"malformed",\n',
+      `${JSON.stringify({ id: 'expected-failure', qid: '../bad', variantSeed: '1' })}\n`,
+      `${JSON.stringify({ id: 'valid-after-failure', qid: 'warm/recovery', variantSeed: '1' })}\n`,
+    ]);
+    const output = new CollectingWritable();
+
+    await serveQuestionPreview({
+      defaults: {
+        qid: 'warm/recovery',
+        variantSeed: '1',
+      },
+      input,
+      output,
+      runtimeOptions: {
+        courseDir,
+        prewarmWorkers: true,
+        urlPrefix: '/warm-preview',
+        workersExecutionMode: 'native',
+      },
+    });
+
+    const lines = output.lines();
+
+    assert.deepEqual(lines[0], { ok: true, type: 'ready' });
+    assert.equal(lines[1].type, 'response');
+    assert.equal(lines[1].ok, false);
+    assert.match(lines[1].diagnostics[0].message, /Invalid JSON request line/);
+    assert.equal('error' in lines[1], false);
+
+    assert.equal(lines[2].type, 'response');
+    assert.equal(lines[2].ok, false);
+    assert.equal(lines[2].id, 'expected-failure');
+    assert.match(lines[2].diagnostics[0].message, /Invalid question id/);
+
+    assert.equal(lines[3].type, 'response');
+    assert.equal(lines[3].ok, true);
+    assert.equal(lines[3].id, 'valid-after-failure');
+    assert.match(lines[3].payload.bodyHtml, /Warm recovery/);
+    assert.equal(lines.length, 4);
+  });
+
+  it('shuts down cleanly when stdin closes without requests', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestion(
+      courseDir,
+      'warm/close',
+      'Warm close',
+      '11111111-1111-4111-8111-111111111121',
+    );
+
+    const output = new CollectingWritable();
+
+    await serveQuestionPreview({
+      defaults: {
+        qid: 'warm/close',
+        variantSeed: '1',
+      },
+      input: Readable.from([]),
+      output,
+      runtimeOptions: {
+        courseDir,
+        prewarmWorkers: true,
+        urlPrefix: '/warm-preview',
+        workersExecutionMode: 'native',
+      },
+    });
+
+    assert.deepEqual(output.lines(), [{ ok: true, type: 'ready' }]);
+  });
 });
