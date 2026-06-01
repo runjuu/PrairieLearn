@@ -72,13 +72,14 @@ function diagnosticFromError(err: unknown): QuestionPreviewDiagnostic {
   if (err instanceof Error) {
     return {
       data: isRecord(err) ? err.data : undefined,
+      fatal: true,
       message: err.message,
       name: err.name,
-      stack: err.stack,
     };
   }
 
   return {
+    fatal: true,
     message: String(err),
     name: 'Error',
   };
