@@ -8,9 +8,10 @@ import minimist from 'minimist';
 import {
   createQuestionPreviewRuntime,
   renderQuestionPreview,
+  type QuestionPreviewCacheType,
   type QuestionPreviewDiagnostic,
-  type QuestionPreviewInput,
   type QuestionPreviewRuntimeRenderInput,
+  type QuestionPreviewRuntimeOptions,
   type QuestionPreviewResult,
   type QuestionPreviewWorkersExecutionMode,
 } from './lib/question-preview-render.js';
@@ -26,6 +27,11 @@ function usage() {
   --variant-seed <seed>               Variant seed (default: ${DEFAULT_VARIANT_SEED})
   --url-prefix <prefix>               URL prefix used in rendered question asset URLs
   --workers-execution-mode <mode>     native or container (default: native)
+  --workers-count <count>             Worker process count (default: 1)
+  --prewarm-workers                   Start workers during runtime initialization
+  --cache-type <type>                 none, memory, or redis (default: none)
+  --dev-mode                          Enable PrairieLearn dev-mode diagnostics
+  --question-timeout-ms <ms>          Question worker timeout (default: 5000)
   --serve                             Warm runtime mode: JSON Lines over stdin/stdout
   -h, --help                          Display this help and exit
 
@@ -42,12 +48,58 @@ function stringArg(argv: Record<string, unknown>, primary: string, aliases: stri
   return undefined;
 }
 
+function booleanArg(argv: Record<string, unknown>, primary: string, aliases: string[] = []) {
+  for (const key of [primary, ...aliases]) {
+    const value = argv[key];
+    if (typeof value === 'boolean') return value;
+  }
+  return undefined;
+}
+
+function booleanEnv(name: string): boolean | undefined {
+  const value = process.env[name];
+  if (value == null || value.length === 0) return undefined;
+  if (value === '1' || value.toLowerCase() === 'true') return true;
+  if (value === '0' || value.toLowerCase() === 'false') return false;
+  throw new Error(`Invalid ${name} value "${value}". Expected true/false or 1/0.`);
+}
+
+function positiveIntegerArg({
+  argv,
+  defaultValue,
+  envName,
+  label,
+  primary,
+}: {
+  argv: Record<string, unknown>;
+  defaultValue: number;
+  envName: string;
+  label: string;
+  primary: string;
+}) {
+  const rawValue = stringArg(argv, primary) ?? process.env[envName];
+  if (rawValue == null) return defaultValue;
+  const value = Number.parseInt(rawValue, 10);
+  if (!Number.isSafeInteger(value) || value <= 0 || value.toString() !== rawValue) {
+    throw new Error(`Invalid ${label} "${rawValue}". Expected a positive integer.`);
+  }
+  return value;
+}
+
 function parseWorkersExecutionMode(value: string | undefined): QuestionPreviewWorkersExecutionMode {
   const mode = value ?? process.env.PL_PREVIEW_WORKERS_EXECUTION_MODE ?? 'native';
   if (mode !== 'native' && mode !== 'container') {
     throw new Error(`Invalid workers execution mode "${mode}". Expected "native" or "container".`);
   }
   return mode;
+}
+
+function parseCacheType(value: string | undefined): QuestionPreviewCacheType {
+  const cacheType = value ?? process.env.PL_PREVIEW_CACHE_TYPE ?? 'none';
+  if (cacheType !== 'none' && cacheType !== 'memory' && cacheType !== 'redis') {
+    throw new Error(`Invalid cache type "${cacheType}". Expected "none", "memory", or "redis".`);
+  }
+  return cacheType;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -119,16 +171,34 @@ function parseServeRequest(
     throw new Error('Invalid request line. Expected a JSON object.');
   }
 
-  if (parsed.workersExecutionMode != null || parsed['workers-execution-mode'] != null) {
-    throw new Error('workersExecutionMode is fixed for --serve; set it when starting the process.');
+  const startupScopedFields = [
+    'cacheType',
+    'cache-type',
+    'courseDir',
+    'course-dir',
+    'devMode',
+    'dev-mode',
+    'prewarmWorkers',
+    'prewarm-workers',
+    'questionTimeoutMilliseconds',
+    'question-timeout-ms',
+    'urlPrefix',
+    'url-prefix',
+    'workersCount',
+    'workers-count',
+    'workersExecutionMode',
+    'workers-execution-mode',
+  ].filter((field) => parsed[field] != null);
+  if (startupScopedFields.length > 0) {
+    throw new Error(
+      `Render requests cannot override startup-scoped preview configuration: ${startupScopedFields.join(', ')}.`,
+    );
   }
 
   return {
     id: parsed.id,
     input: {
-      courseDir: stringField(parsed, 'courseDir', ['course-dir']) ?? defaults.courseDir,
       qid: stringField(parsed, 'qid') ?? defaults.qid,
-      urlPrefix: stringField(parsed, 'urlPrefix', ['url-prefix']) ?? defaults.urlPrefix,
       variantSeed: stringField(parsed, 'variantSeed', ['variant-seed']) ?? defaults.variantSeed,
     },
   };
@@ -143,12 +213,9 @@ async function serveQuestionPreview({
   runtimeOptions,
 }: {
   defaults: QuestionPreviewRuntimeRenderInput;
-  runtimeOptions: Pick<QuestionPreviewInput, 'urlPrefix' | 'workersExecutionMode'>;
+  runtimeOptions: QuestionPreviewRuntimeOptions;
 }) {
-  const runtime = await createQuestionPreviewRuntime({
-    ...runtimeOptions,
-    prewarmWorkers: true,
-  });
+  const runtime = await createQuestionPreviewRuntime(runtimeOptions);
   writeJsonLine({ ok: true, ready: true });
   const lines = createInterface({
     crlfDelay: Infinity,
@@ -191,15 +258,18 @@ async function main() {
     alias: {
       h: 'help',
     },
-    boolean: ['help', 'serve'],
+    boolean: ['dev-mode', 'help', 'prewarm-workers', 'serve'],
     string: [
+      'cache-type',
       'course-dir',
       'courseDir',
       'mode',
       'qid',
+      'question-timeout-ms',
       'url-prefix',
       'variant-seed',
       'variantSeed',
+      'workers-count',
       'workers-execution-mode',
     ],
   });
@@ -228,29 +298,52 @@ async function main() {
   const workersExecutionMode = parseWorkersExecutionMode(
     stringArg(argv, 'workers-execution-mode', ['mode']),
   );
+  const workersCount = positiveIntegerArg({
+    argv,
+    defaultValue: 1,
+    envName: 'PL_PREVIEW_WORKERS_COUNT',
+    label: 'workers count',
+    primary: 'workers-count',
+  });
+  const questionTimeoutMilliseconds = positiveIntegerArg({
+    argv,
+    defaultValue: 5000,
+    envName: 'PL_PREVIEW_QUESTION_TIMEOUT_MS',
+    label: 'question timeout',
+    primary: 'question-timeout-ms',
+  });
+  const prewarmWorkers =
+    booleanArg(argv, 'prewarm-workers') ??
+    booleanEnv('PL_PREVIEW_PREWARM_WORKERS') ??
+    Boolean(argv.serve);
+  const devMode = booleanArg(argv, 'dev-mode') ?? booleanEnv('PL_PREVIEW_DEV_MODE') ?? false;
+  const cacheType = parseCacheType(stringArg(argv, 'cache-type'));
+  const runtimeOptions: QuestionPreviewRuntimeOptions = {
+    cacheType,
+    courseDir,
+    devMode,
+    prewarmWorkers,
+    questionTimeoutMilliseconds,
+    urlPrefix,
+    workersCount,
+    workersExecutionMode,
+  };
 
   if (argv.serve) {
     await serveQuestionPreview({
       defaults: {
-        courseDir,
         qid,
-        urlPrefix,
         variantSeed,
       },
-      runtimeOptions: {
-        urlPrefix,
-        workersExecutionMode,
-      },
+      runtimeOptions,
     });
     return;
   }
 
   const result = await renderQuestionPreview({
-    courseDir,
     qid,
-    urlPrefix,
     variantSeed,
-    workersExecutionMode,
+    ...runtimeOptions,
   });
 
   console.log(JSON.stringify(result));
