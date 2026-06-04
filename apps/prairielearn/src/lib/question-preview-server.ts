@@ -4,7 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import express, { type ErrorRequestHandler } from 'express';
+import express, { type ErrorRequestHandler, type Express, type Response } from 'express';
 import asyncHandler from 'express-async-handler';
 
 import * as assets from './assets.js';
@@ -233,39 +233,6 @@ function sendEmpty(res: http.ServerResponse, statusCode: number) {
   res.end();
 }
 
-function contentTypeForPath(filePath: string) {
-  switch (path.extname(filePath).toLowerCase()) {
-    case '.css':
-      return 'text/css; charset=utf-8';
-    case '.gif':
-      return 'image/gif';
-    case '.html':
-      return 'text/html; charset=utf-8';
-    case '.ico':
-      return 'image/x-icon';
-    case '.jpeg':
-    case '.jpg':
-      return 'image/jpeg';
-    case '.js':
-    case '.mjs':
-      return 'text/javascript; charset=utf-8';
-    case '.json':
-      return 'application/json; charset=utf-8';
-    case '.png':
-      return 'image/png';
-    case '.svg':
-      return 'image/svg+xml';
-    case '.txt':
-      return 'text/plain; charset=utf-8';
-    case '.woff':
-      return 'font/woff';
-    case '.woff2':
-      return 'font/woff2';
-    default:
-      return 'application/octet-stream';
-  }
-}
-
 function decodeAssetPathSegments(encodedPath: string) {
   if (encodedPath.length === 0) return null;
 
@@ -346,22 +313,40 @@ function isGeneratedFilesRenderId(renderId: string) {
   );
 }
 
-function assetRequestFromPathname(courseDir: string, generatedFilesRoot: string, pathname: string) {
-  const generatedFilesPrefix = '/preview-render/generatedFilesQuestion/render/';
-  if (pathname.startsWith(generatedFilesPrefix)) {
-    const segments = decodeAssetPathSegments(pathname.slice(generatedFilesPrefix.length));
-    if (segments == null || segments.length < 2) return null;
+interface BoundedAssetRequest {
+  roots: string[];
+  segments: string[];
+}
 
-    const [renderId, ...fileSegments] = segments;
-    if (!isGeneratedFilesRenderId(renderId)) return null;
+const GENERATED_FILES_ROUTE_PREFIX = '/preview-render/generatedFilesQuestion/render/';
 
-    return {
-      roots: [path.join(generatedFilesRoot, renderId)],
-      segments: fileSegments,
-    };
-  }
+function isGeneratedFilesAssetRoutePathname(pathname: string) {
+  return pathname.startsWith(GENERATED_FILES_ROUTE_PREFIX);
+}
 
-  const staticAssetRoutes = [
+function generatedFilesAssetRequestFromPathname(
+  generatedFilesRoot: string,
+  pathname: string,
+): BoundedAssetRequest | null {
+  if (!isGeneratedFilesAssetRoutePathname(pathname)) return null;
+
+  const segments = decodeAssetPathSegments(pathname.slice(GENERATED_FILES_ROUTE_PREFIX.length));
+  if (segments == null || segments.length < 2) return null;
+
+  const [renderId, ...fileSegments] = segments;
+  if (!isGeneratedFilesRenderId(renderId)) return null;
+
+  return {
+    roots: [path.join(generatedFilesRoot, renderId)],
+    segments: fileSegments,
+  };
+}
+
+function startupCourseAssetRequestFromPathname(
+  courseDir: string,
+  pathname: string,
+): BoundedAssetRequest | null {
+  const startupCourseAssetRoutes = [
     {
       prefix: '/preview-render/clientFilesCourse/',
       roots: [path.join(courseDir, 'clientFilesCourse')],
@@ -389,7 +374,7 @@ function assetRequestFromPathname(courseDir: string, generatedFilesRoot: string,
     },
   ];
 
-  for (const route of staticAssetRoutes) {
+  for (const route of startupCourseAssetRoutes) {
     if (!pathname.startsWith(route.prefix)) continue;
 
     const segments = decodeAssetPathSegments(pathname.slice(route.prefix.length));
@@ -442,27 +427,7 @@ function errorStatusCode(err: unknown) {
     : null;
 }
 
-async function handleAssetRequest({
-  options,
-  generatedFilesRoot,
-  req,
-  res,
-}: {
-  generatedFilesRoot: string;
-  options: QuestionPreviewServerOptions;
-  req: http.IncomingMessage;
-  res: http.ServerResponse;
-}) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    sendEmpty(res, 405);
-    return;
-  }
-
-  const assetRequest = assetRequestFromPathname(
-    options.courseDir,
-    generatedFilesRoot,
-    rawRequestPathname(req),
-  );
+async function sendBoundedAssetRequest(res: Response, assetRequest: BoundedAssetRequest | null) {
   if (assetRequest == null) {
     sendEmpty(res, 404);
     return;
@@ -474,12 +439,68 @@ async function handleAssetRequest({
     return;
   }
 
-  const contents = req.method === 'HEAD' ? null : await fs.readFile(filePath);
-  res.writeHead(200, {
-    'cache-control': 'no-store',
-    'content-type': contentTypeForPath(filePath),
+  await new Promise<void>((resolve, reject) => {
+    res.sendFile(filePath, { headers: { 'cache-control': 'no-store' } }, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
   });
-  res.end(contents);
+}
+
+async function handleStartupCourseAssetRequest({
+  options,
+  req,
+  res,
+}: {
+  options: QuestionPreviewServerOptions;
+  req: http.IncomingMessage;
+  res: Response;
+}) {
+  await sendBoundedAssetRequest(
+    res,
+    startupCourseAssetRequestFromPathname(options.courseDir, rawRequestPathname(req)),
+  );
+}
+
+async function handleGeneratedFilesAssetRequest({
+  generatedFilesRoot,
+  req,
+  res,
+}: {
+  generatedFilesRoot: string;
+  req: http.IncomingMessage;
+  res: Response;
+}) {
+  await sendBoundedAssetRequest(
+    res,
+    generatedFilesAssetRequestFromPathname(generatedFilesRoot, rawRequestPathname(req)),
+  );
+}
+
+const STARTUP_COURSE_ASSET_ROUTE_PATTERNS = [
+  '/preview-render/clientFilesCourse/*',
+  '/preview-render/elements/*',
+  '/preview-render/cacheableElements/*',
+  '/preview-render/elementExtensions/*',
+  '/preview-render/cacheableElementExtensions/*',
+  '/preview-render/questions/*',
+];
+
+function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreviewServerOptions) {
+  for (const routePattern of STARTUP_COURSE_ASSET_ROUTE_PATTERNS) {
+    app.get(
+      routePattern,
+      asyncHandler(async (req, res) => {
+        await handleStartupCourseAssetRequest({ options, req, res });
+      }),
+    );
+    app.all(routePattern, (_req, res) => {
+      sendEmpty(res, 405);
+    });
+  }
 }
 
 function renderPreviewDocument(payload: QuestionPreviewPayload) {
@@ -861,12 +882,24 @@ function createQuestionPreviewApp({
     handleQuestionDiscoveryMethodNotAllowed({ options, req, res });
   });
 
+  registerStartupCourseAssetRoutes(app, options);
+
   app.use(
     asyncHandler(async (req, res) => {
       const rawPathname = rawRequestPathname(req);
 
+      if (isGeneratedFilesAssetRoutePathname(rawPathname)) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          sendEmpty(res, 405);
+          return;
+        }
+
+        await handleGeneratedFilesAssetRequest({ generatedFilesRoot, req, res });
+        return;
+      }
+
       if (isAssetRoutePathname(rawPathname)) {
-        await handleAssetRequest({ generatedFilesRoot, options, req, res });
+        sendEmpty(res, 404);
         return;
       }
 
