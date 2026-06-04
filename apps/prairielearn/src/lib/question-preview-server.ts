@@ -8,13 +8,11 @@ import express, {
   type ErrorRequestHandler,
   type Express,
   type Request,
-  type RequestHandler,
   type Response,
 } from 'express';
 import asyncHandler from 'express-async-handler';
 
 import * as assets from './assets.js';
-import { discoverInfoDirs } from './discover-info-dirs.js';
 import {
   parseQuestionPreviewServerOptions,
   type QuestionPreviewServerOptions,
@@ -33,14 +31,6 @@ const GENERATED_FILES_OWNER_FILE = '.owner.json';
 const activeGeneratedFilesRoots = new Set<string>();
 
 export { parseQuestionPreviewServerOptions, type QuestionPreviewServerOptions };
-
-export interface QuestionDiscoveryItem {
-  previewUrl: string;
-  qid: string;
-  title: string;
-  topic: string | null;
-  type: string;
-}
 
 export interface StartedQuestionPreviewServer {
   close(): Promise<void>;
@@ -654,146 +644,6 @@ function invalidQuestionPreviewQid(qid: string) {
 }
 
 /**
- * Builds the default direct-preview URL for a question ID.
- *
- * @param qid - Course-relative question ID.
- */
-function previewUrlForQid(qid: string) {
-  return `/questions/${qid.split('/').map(encodeURIComponent).join('/')}?variant=1`;
-}
-
-/**
- * Converts parsed `info.json` metadata into a discovery API item.
- *
- * @param qid - Course-relative question ID.
- * @param info - Parsed `info.json` object for the question.
- */
-function questionDiscoveryItem(qid: string, info: Record<string, unknown>): QuestionDiscoveryItem {
-  if (
-    typeof info.title !== 'string' ||
-    typeof info.topic !== 'string' ||
-    typeof info.type !== 'string'
-  ) {
-    throw new Error('Expected info.json to contain string title, topic, and type fields.');
-  }
-
-  return {
-    previewUrl: previewUrlForQid(qid),
-    qid,
-    title: info.title,
-    topic: info.topic,
-    type: info.type,
-  };
-}
-
-/**
- * Builds a discovery item for a question with invalid or unreadable metadata.
- *
- * @param qid - Course-relative question ID.
- */
-function invalidQuestionDiscoveryItem(qid: string): QuestionDiscoveryItem {
-  return {
-    previewUrl: previewUrlForQid(qid),
-    qid,
-    title: qid,
-    topic: null,
-    type: 'invalid-info-json',
-  };
-}
-
-/**
- * Lists questions in a course for the preview discovery API.
- *
- * @param courseDir - Course directory supplied at preview-server startup.
- */
-export async function listQuestionDiscoveryItems(
-  courseDir: string,
-): Promise<QuestionDiscoveryItem[]> {
-  const questionsRoot = path.join(courseDir, 'questions');
-  const qids = await discoverInfoDirs(questionsRoot, 'info.json');
-  const questions = await Promise.all(
-    qids.map(async (qidPath) => {
-      const qid = qidPath.split(path.sep).join('/');
-      const infoPath = path.join(questionsRoot, qidPath, 'info.json');
-      try {
-        const info = JSON.parse(await fs.readFile(infoPath, 'utf8')) as unknown;
-        if (typeof info !== 'object' || info == null || Array.isArray(info)) {
-          throw new Error('Expected info.json to contain an object.');
-        }
-        return questionDiscoveryItem(qid, info as Record<string, unknown>);
-      } catch {
-        return invalidQuestionDiscoveryItem(qid);
-      }
-    }),
-  );
-  return questions.sort((a, b) => a.qid.localeCompare(b.qid));
-}
-
-/**
- * Adds discovery API CORS headers to allowed discovery requests.
- *
- * @param options - Preview-server options containing allowed CORS origins.
- */
-function discoveryCorsMiddleware(options: QuestionPreviewServerOptions): RequestHandler {
-  return (req, res, next) => {
-    const origin = req.get('origin');
-    if (origin != null && options.corsOrigins.includes(origin)) {
-      res.set('access-control-allow-origin', origin);
-      res.vary('Origin');
-    }
-
-    next();
-  };
-}
-
-/**
- * Handles CORS preflight requests for the question discovery API.
- *
- * @param params - Discovery preflight inputs.
- * @param params.req - Incoming preflight request.
- * @param params.res - Express response object.
- */
-function handleQuestionDiscoveryPreflight(params: { req: Request; res: Response }) {
-  const { req, res } = params;
-
-  const requestHeaders = req.get('access-control-request-headers');
-  res.status(204).set('access-control-allow-methods', 'GET, OPTIONS');
-  if (requestHeaders != null) {
-    res.set('access-control-allow-headers', requestHeaders);
-  }
-  res.end();
-}
-
-/**
- * Handles discovery API GET requests by returning the startup course question
- * list.
- *
- * @param params - Discovery GET inputs.
- * @param params.options - Preview-server options, including `courseDir`.
- * @param params.res - Express response object.
- */
-async function handleQuestionDiscoveryGet(params: {
-  options: QuestionPreviewServerOptions;
-  res: Response;
-}) {
-  const { options, res } = params;
-
-  res.status(200).json(await listQuestionDiscoveryItems(options.courseDir));
-}
-
-/**
- * Sends a CORS-aware 405 response for unsupported discovery API methods.
- *
- * @param params - Discovery method-not-allowed inputs.
- * @param params.res - Express response object.
- */
-function handleQuestionDiscoveryMethodNotAllowed(params: { res: Response }) {
-  const { res } = params;
-
-  res.status(405).json({ error: 'Method not allowed' });
-}
-
-/**
  * Handles direct question preview URLs and renders the requested question.
  *
  * @param params - Direct preview request inputs.
@@ -870,8 +720,8 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
 }
 
 /**
- * Creates the Express app that serves direct previews, discovery API responses,
- * core assets, course assets, and generated files.
+ * Creates the Express app that serves direct previews, core assets, course
+ * assets, and generated files.
  *
  * @param params - Express app dependencies.
  * @param params.generatedFilesRoot - Temp root for generated preview files.
@@ -908,21 +758,6 @@ function createQuestionPreviewApp(params: {
       await handleQuestionPreviewRequest({ generatedFilesRoot, options, qid, req, res, runtime });
     }),
   );
-
-  app
-    .route('/api/questions')
-    .all(discoveryCorsMiddleware(options))
-    .options((req, res) => {
-      handleQuestionDiscoveryPreflight({ req, res });
-    })
-    .get(
-      asyncHandler(async (req, res) => {
-        await handleQuestionDiscoveryGet({ options, res });
-      }),
-    )
-    .all((_req, res) => {
-      handleQuestionDiscoveryMethodNotAllowed({ res });
-    });
 
   registerStartupCourseAssetRoutes(app, options);
   registerGeneratedFilesAssetRoutes(app, generatedFilesRoot);

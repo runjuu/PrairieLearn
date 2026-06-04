@@ -125,7 +125,6 @@ describe('question preview server startup', () => {
       const defaultOptions = await parseQuestionPreviewServerOptions(['--course-dir', courseDir]);
       assert.deepEqual(defaultOptions, {
         cacheType: 'none',
-        corsOrigins: ['http://127.0.0.1:3000', 'http://localhost:3000'],
         courseDir: path.resolve(courseDir),
         devMode: false,
         host: '127.0.0.1',
@@ -142,10 +141,6 @@ describe('question preview server startup', () => {
         courseDir,
         '--cache-type',
         'memory',
-        '--cors-origin',
-        ' http://127.0.0.1:5173/demo , https://example.test ',
-        '--cors-origin',
-        'http://127.0.0.1:5173',
         '--dev-mode',
         '--host',
         '0.0.0.0',
@@ -165,7 +160,6 @@ describe('question preview server startup', () => {
 
       assert.deepEqual(explicitOptions, {
         cacheType: 'memory',
-        corsOrigins: ['http://127.0.0.1:5173', 'https://example.test'],
         courseDir: path.resolve(courseDir),
         devMode: true,
         host: '0.0.0.0',
@@ -219,10 +213,6 @@ describe('question preview server startup', () => {
       {
         argv: ['--course-dir', courseDir, '--workers-execution-mode', 'disabled'],
         message: /Invalid --workers-execution-mode/,
-      },
-      {
-        argv: ['--course-dir', courseDir, '--cors-origin', 'ftp://example.test'],
-        message: /Invalid --cors-origin/,
       },
       { argv: ['--course-dir', missingCourseDir], message: /Invalid --course-dir/ },
     ];
@@ -365,303 +355,6 @@ describe('question preview server startup', () => {
     }
 
     assert.equal(await pathExists(second.generatedFilesRoot), false);
-  });
-});
-
-describe('question preview server discovery API', () => {
-  it('recursively lists valid questions with canonical preview URLs', async () => {
-    const courseDir = await makeTempCourse();
-    await writeQuestionInfo(courseDir, 'beta/question', {
-      title: 'Beta question',
-      topic: 'Rendering',
-      type: 'v3',
-      uuid: '11111111-1111-4111-8111-111111111126',
-    });
-    await writeQuestionInfo(courseDir, 'alpha/question', {
-      title: 'Alpha question',
-      topic: 'Logic',
-      type: 'Freeform',
-      uuid: '11111111-1111-4111-8111-111111111127',
-    });
-
-    const started = await startQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    try {
-      const response = await fetch(`${serverUrl(started)}/api/questions`);
-      const questions = await response.json();
-
-      assert.equal(response.status, 200);
-      assert.match(response.headers.get('content-type') ?? '', /application\/json/);
-      assert.deepEqual(questions, [
-        {
-          previewUrl: '/questions/alpha/question?variant=1',
-          qid: 'alpha/question',
-          title: 'Alpha question',
-          topic: 'Logic',
-          type: 'Freeform',
-        },
-        {
-          previewUrl: '/questions/beta/question?variant=1',
-          qid: 'beta/question',
-          title: 'Beta question',
-          topic: 'Rendering',
-          type: 'v3',
-        },
-      ]);
-    } finally {
-      await started.close();
-      await fs.rm(courseDir, { force: true, recursive: true });
-    }
-  });
-
-  it('includes invalid question metadata entries with an invalid-info marker', async () => {
-    const courseDir = await makeTempCourse();
-    await writeQuestionInfo(courseDir, 'valid/question', {
-      title: 'Valid question',
-      topic: 'Rendering',
-      type: 'v3',
-      uuid: '11111111-1111-4111-8111-111111111128',
-    });
-    await writeQuestionFile(courseDir, 'broken/question', 'info.json', '{ not valid json');
-    await writeQuestionFile(
-      courseDir,
-      'missing/title',
-      'info.json',
-      JSON.stringify({ topic: 'Rendering', type: 'v3' }),
-    );
-
-    const started = await startQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    try {
-      const response = await fetch(`${serverUrl(started)}/api/questions`);
-      const questions = await response.json();
-
-      assert.equal(response.status, 200);
-      assert.deepEqual(questions, [
-        {
-          previewUrl: '/questions/broken/question?variant=1',
-          qid: 'broken/question',
-          title: 'broken/question',
-          topic: null,
-          type: 'invalid-info-json',
-        },
-        {
-          previewUrl: '/questions/missing/title?variant=1',
-          qid: 'missing/title',
-          title: 'missing/title',
-          topic: null,
-          type: 'invalid-info-json',
-        },
-        {
-          previewUrl: '/questions/valid/question?variant=1',
-          qid: 'valid/question',
-          title: 'Valid question',
-          topic: 'Rendering',
-          type: 'v3',
-        },
-      ]);
-    } finally {
-      await started.close();
-      await fs.rm(courseDir, { force: true, recursive: true });
-    }
-  });
-
-  it('does not accept or reveal a per-request course directory', async () => {
-    const courseDir = await makeTempCourse();
-    const otherCourseDir = await makeTempCourse();
-    await writeQuestionInfo(courseDir, 'startup/question', {
-      title: 'Startup-bound question',
-      topic: 'Rendering',
-      type: 'v3',
-      uuid: '11111111-1111-4111-8111-111111111129',
-    });
-    await writeQuestionInfo(otherCourseDir, 'other/question', {
-      title: 'Other course question',
-      topic: 'Rendering',
-      type: 'v3',
-      uuid: '11111111-1111-4111-8111-111111111130',
-    });
-
-    const started = await startQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    try {
-      const response = await fetch(
-        `${serverUrl(started)}/api/questions?courseDir=${encodeURIComponent(otherCourseDir)}`,
-      );
-      const text = await response.text();
-      const questions = JSON.parse(text);
-
-      assert.equal(response.status, 200);
-      assert.deepEqual(
-        questions.map((question: { qid: string }) => question.qid),
-        ['startup/question'],
-      );
-      nodeAssert.doesNotMatch(text, new RegExp(courseDir.replaceAll('/', '\\/')));
-      nodeAssert.doesNotMatch(text, new RegExp(otherCourseDir.replaceAll('/', '\\/')));
-      nodeAssert.doesNotMatch(text, /Other course question/);
-    } finally {
-      await started.close();
-      await fs.rm(courseDir, { force: true, recursive: true });
-      await fs.rm(otherCourseDir, { force: true, recursive: true });
-    }
-  });
-
-  it('does not expose discovery responses on adjacent API paths', async () => {
-    const courseDir = await makeTempCourse();
-    await writeQuestionInfo(courseDir, 'exact/discovery-route', {
-      title: 'Exact discovery route',
-      topic: 'Rendering',
-      type: 'v3',
-      uuid: '11111111-1111-4111-8111-111111111138',
-    });
-    const started = await startQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    try {
-      const response = await fetch(`${serverUrl(started)}/api/questions/`, {
-        headers: { origin: 'http://localhost:3000' },
-      });
-      const body = await response.text();
-
-      assert.equal(response.status, 404);
-      assert.equal(response.headers.get('access-control-allow-origin'), null);
-      nodeAssert.doesNotMatch(body, /Exact discovery route|exact\/discovery-route/);
-    } finally {
-      await started.close();
-      await fs.rm(courseDir, { force: true, recursive: true });
-    }
-  });
-
-  it('allows only default local Next.js origins for discovery CORS', async () => {
-    const courseDir = await makeTempCourse();
-    await writeQuestionInfo(courseDir, 'cors/question', {
-      title: 'CORS question',
-      topic: 'Rendering',
-      type: 'v3',
-      uuid: '11111111-1111-4111-8111-111111111131',
-    });
-    const started = await startQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async (input) => ({
-          diagnostics: [],
-          ok: true,
-          payload: {
-            bodyHtml: '<p>Preview body</p>',
-            headHtml: '',
-            variant: { seed: input.variantSeed ?? '1' },
-          },
-        }),
-      }),
-    });
-
-    try {
-      const baseUrl = serverUrl(started);
-      const allowedDiscovery = await fetch(`${baseUrl}/api/questions`, {
-        headers: { origin: 'http://localhost:3000' },
-      });
-
-      assert.equal(allowedDiscovery.status, 200);
-      assert.equal(
-        allowedDiscovery.headers.get('access-control-allow-origin'),
-        'http://localhost:3000',
-      );
-      assert.notEqual(allowedDiscovery.headers.get('access-control-allow-origin'), '*');
-      assert.match(allowedDiscovery.headers.get('vary') ?? '', /Origin/);
-
-      const blockedDiscovery = await fetch(`${baseUrl}/api/questions`, {
-        headers: { origin: 'http://example.test:3000' },
-      });
-
-      assert.equal(blockedDiscovery.status, 200);
-      assert.equal(blockedDiscovery.headers.get('access-control-allow-origin'), null);
-
-      const preflight = await fetch(`${baseUrl}/api/questions`, {
-        headers: {
-          'access-control-request-method': 'GET',
-          origin: 'http://127.0.0.1:3000',
-        },
-        method: 'OPTIONS',
-      });
-
-      assert.equal(preflight.status, 204);
-      assert.equal(preflight.headers.get('access-control-allow-origin'), 'http://127.0.0.1:3000');
-      assert.match(preflight.headers.get('access-control-allow-methods') ?? '', /GET/);
-
-      const preview = await fetch(`${baseUrl}/questions/cors/question?variant=1`, {
-        headers: { origin: 'http://localhost:3000' },
-      });
-
-      assert.equal(preview.status, 200);
-      assert.equal(preview.headers.get('access-control-allow-origin'), null);
-
-      const asset = await fetch(`${baseUrl}/preview-render/clientFilesCourse/example.css`, {
-        headers: { origin: 'http://localhost:3000' },
-      });
-
-      assert.equal(asset.headers.get('access-control-allow-origin'), null);
-    } finally {
-      await started.close();
-      await fs.rm(courseDir, { force: true, recursive: true });
-    }
-  });
-
-  it('uses configured discovery CORS origins instead of the defaults', async () => {
-    const courseDir = await makeTempCourse();
-    const configuredOrigin = 'http://127.0.0.1:5173';
-    const started = await startQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0', '--cors-origin', configuredOrigin],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    try {
-      assert.deepEqual(started.options.corsOrigins, [configuredOrigin]);
-
-      const baseUrl = serverUrl(started);
-      const configured = await fetch(`${baseUrl}/api/questions`, {
-        headers: { origin: configuredOrigin },
-      });
-
-      assert.equal(configured.status, 200);
-      assert.equal(configured.headers.get('access-control-allow-origin'), configuredOrigin);
-
-      const defaultOrigin = await fetch(`${baseUrl}/api/questions`, {
-        headers: { origin: 'http://localhost:3000' },
-      });
-
-      assert.equal(defaultOrigin.status, 200);
-      assert.equal(defaultOrigin.headers.get('access-control-allow-origin'), null);
-    } finally {
-      await started.close();
-      await fs.rm(courseDir, { force: true, recursive: true });
-    }
   });
 });
 
