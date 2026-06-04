@@ -1,6 +1,6 @@
+import nodeAssert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import http from 'node:http';
-import nodeAssert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -647,7 +647,7 @@ describe('question preview server asset routes', () => {
 describe('question preview server direct preview route', () => {
   it('redirects missing variants and renders a full HTML document for direct question URLs', async () => {
     const courseDir = await makeTempCourse();
-    const renderCalls: Array<{ qid: string; variantSeed?: string }> = [];
+    const renderCalls: { qid: string; variantSeed?: string }[] = [];
     const started = await startQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
@@ -741,9 +741,130 @@ describe('question preview server direct preview route', () => {
     }
   });
 
+  it('does not expose assessment backend routes', async () => {
+    const courseDir = await makeTempCourse();
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({
+          diagnostics: [],
+          ok: true,
+          payload: {
+            bodyHtml: '<p>Preview only</p>',
+            headHtml: '',
+            variant: { seed: '1' },
+          },
+        }),
+      }),
+    });
+
+    try {
+      const absentRoutes = [
+        { method: 'GET', path: '/parse' },
+        { method: 'POST', path: '/grade' },
+        { method: 'POST', path: '/submission' },
+        { method: 'POST', path: '/answer-save' },
+        { method: 'GET', path: '/saved-answer' },
+        { method: 'GET', path: '/answer-panel' },
+        { method: 'GET', path: '/assessment/1' },
+        { method: 'POST', path: '/questions/demo/example?variant=1' },
+      ];
+
+      for (const route of absentRoutes) {
+        const response = await fetch(`${serverUrl(started)}${route.path}`, {
+          method: route.method,
+        });
+        const body = await response.text();
+
+        assert.notEqual(response.status, 200, route.path);
+        nodeAssert.doesNotMatch(body, /Preview only|"ok"|"payload"|"diagnostics"/, route.path);
+      }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns bounded sanitized HTML diagnostics instead of negotiating JSON', async () => {
+    const courseDir = await makeTempCourse();
+    const longOutput = `combined output first line\n${'x'.repeat(5000)}\ncombined output hidden tail`;
+    const longStderr = `stderr first line from ${courseDir}\n${'y'.repeat(5000)}\nstderr hidden tail`;
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({
+          diagnostics: [
+            {
+              data: {
+                env: { SECRET_TOKEN: 'shh' },
+                outputBoth: longOutput,
+                source: '<pl-question-panel>full question source</pl-question-panel>',
+                stack: `Error: render failed\n    at render (${courseDir}/server.py:3:1)`,
+                stderr: longStderr,
+              },
+              fatal: true,
+              message: `Render failed while reading ${courseDir}/questions/demo/example/server.py`,
+              name: 'CourseIssueError',
+              phase: 'generate',
+            },
+          ],
+          ok: false,
+        }),
+      }),
+    });
+
+    try {
+      const response = await fetch(`${serverUrl(started)}/questions/demo/example?variant=1`, {
+        headers: { accept: 'application/json' },
+      });
+      const html = await response.text();
+
+      assert.equal(response.status, 422);
+      assert.match(response.headers.get('content-type') ?? '', /text\/html/);
+      assert.match(html, /CourseIssueError/);
+      assert.match(html, /Phase: generate/);
+      assert.match(html, /Render failed while reading/);
+      assert.match(html, /combined output first line/);
+      assert.match(html, /stderr first line/);
+      nodeAssert.doesNotMatch(html, new RegExp(courseDir.replaceAll('/', '\\/')));
+      nodeAssert.doesNotMatch(html, /combined output hidden tail|stderr hidden tail/);
+      nodeAssert.doesNotMatch(html, /SECRET_TOKEN|shh|full question source|at render/);
+      assert.isBelow(html.length, 7000);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects invalid qid path forms with diagnostic pages', async () => {
+    const courseDir = await makeTempCourse();
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+    });
+
+    try {
+      for (const invalidPath of [
+        '/questions/demo%5Cexample?variant=1',
+        '/questions/%2e%2e/secret?variant=1',
+      ]) {
+        const response = await requestRawPath(started, invalidPath);
+
+        assert.equal(response.status, 422, invalidPath);
+        assert.match(response.body, /Invalid question id/, invalidPath);
+        nodeAssert.doesNotMatch(response.body, /missing info\.json/, invalidPath);
+      }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('keeps the warm runtime after expected direct preview failures', async () => {
     const courseDir = await makeTempCourse();
-    const renderCalls: Array<{ qid: string; runtimeId: number; variantSeed?: string }> = [];
+    const renderCalls: { qid: string; runtimeId: number; variantSeed?: string }[] = [];
     let runtimeCount = 0;
 
     const started = await startQuestionPreviewServer({
