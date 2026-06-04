@@ -20,6 +20,8 @@ import {
   type QuestionPreviewRuntimeOptions,
   type QuestionPreviewRuntimeRenderInput,
   type QuestionPreviewRuntimeRenderOptions,
+  decodeSafeUrlPathSegments,
+  isPathInsideRoot,
 } from './question-preview-render.js';
 import {
   type QuestionPreviewServerOptions,
@@ -261,57 +263,6 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
 }
 
 /**
- * Decodes a route suffix into safe path segments for bounded asset lookup.
- *
- * @param encodedPath - URL-encoded route suffix after the asset-route prefix.
- */
-function decodeAssetPathSegments(encodedPath: string) {
-  if (encodedPath.length === 0) return null;
-
-  const segments = encodedPath.split('/');
-  if (segments.length === 0) return null;
-
-  const decodedSegments: string[] = [];
-  for (const segment of segments) {
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(segment);
-    } catch {
-      return null;
-    }
-
-    if (
-      decoded.length === 0 ||
-      decoded === '.' ||
-      decoded === '..' ||
-      decoded.includes('\0') ||
-      decoded.includes('/') ||
-      decoded.includes('\\') ||
-      path.isAbsolute(decoded)
-    ) {
-      return null;
-    }
-
-    decodedSegments.push(decoded);
-  }
-
-  return decodedSegments;
-}
-
-/**
- * Checks whether a resolved file path stays within an allowed root.
- *
- * @param root - Absolute or relative root directory for the allowed tree.
- * @param filePath - Candidate absolute file path to validate.
- */
-function isPathInsideRoot(root: string, filePath: string) {
-  const relativePath = path.relative(root, filePath);
-  return (
-    relativePath.length === 0 || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-  );
-}
-
-/**
  * Resolves a file below a root while rejecting traversal, missing files, and
  * directories.
  *
@@ -367,7 +318,7 @@ function generatedFilesAssetRequestFromPathname(
   generatedFilesRoot: string,
   pathname: string,
 ): BoundedAssetRequest | null {
-  const segments = decodeAssetPathSegments(pathname.slice(GENERATED_FILES_ROUTE_PREFIX.length));
+  const segments = decodeSafeUrlPathSegments(pathname.slice(GENERATED_FILES_ROUTE_PREFIX.length));
   if (segments == null || segments.length < 2) return null;
 
   const [renderId, ...fileSegments] = segments;
@@ -420,7 +371,7 @@ function startupCourseAssetRequestFromPathname(
   for (const route of startupCourseAssetRoutes) {
     if (!pathname.startsWith(route.prefix)) continue;
 
-    const segments = decodeAssetPathSegments(pathname.slice(route.prefix.length));
+    const segments = decodeSafeUrlPathSegments(pathname.slice(route.prefix.length));
     if (segments == null) return null;
 
     const fileSegments = route.stripCachebuster ? segments.slice(1) : segments;
@@ -434,7 +385,7 @@ function startupCourseAssetRequestFromPathname(
 
   const questionFilesPrefix = '/preview-render/questions/';
   if (pathname.startsWith(questionFilesPrefix)) {
-    const segments = decodeAssetPathSegments(pathname.slice(questionFilesPrefix.length));
+    const segments = decodeSafeUrlPathSegments(pathname.slice(questionFilesPrefix.length));
     if (segments == null) return null;
 
     const filesSegmentIndex = segments.lastIndexOf('files');
