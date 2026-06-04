@@ -7,13 +7,13 @@ import { generateSignedToken } from '@prairielearn/signed-token';
 
 import { HeadContents } from '../components/HeadContents.js';
 import { QuestionHeadContents } from '../components/QuestionHeadContents.js';
-import * as questionServers from '../question-servers/index.js';
 import * as freeformServer from '../question-servers/freeform.js';
+import * as questionServers from '../question-servers/index.js';
 import type { QuestionCaller } from '../question-servers/types.js';
 import {
-  defaultWorkspaceOptions,
-  QuestionJsonSchema,
   type QuestionJson,
+  QuestionJsonSchema,
+  defaultWorkspaceOptions,
 } from '../schemas/index.js';
 
 import * as assets from './assets.js';
@@ -210,7 +210,7 @@ export function makePreviewQuestion(qid: string, info: QuestionJson): Question {
     uuid: info.uuid,
     workspace_args: normalizeWorkspaceArgs(workspaceOptions.args),
     workspace_enable_networking: workspaceOptions.enableNetworking,
-    workspace_environment: workspaceOptions.environment ?? null,
+    workspace_environment: workspaceOptions.environment,
     workspace_graded_files: workspaceOptions.gradedFiles,
     workspace_home: workspaceOptions.home ?? null,
     workspace_image: workspaceOptions.image ?? null,
@@ -305,8 +305,9 @@ function sanitizeDiagnosticText(text: string, sanitizePaths: string[]): string {
 
 function sanitizeDiagnosticValue(value: unknown, sanitizePaths: string[]): unknown {
   if (typeof value === 'string') return sanitizeDiagnosticText(value, sanitizePaths);
-  if (Array.isArray(value))
+  if (Array.isArray(value)) {
     return value.map((item) => sanitizeDiagnosticValue(item, sanitizePaths));
+  }
   if (typeof value === 'object' && value !== null) {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
@@ -436,7 +437,9 @@ function validateQuestionPreviewQid(qid: string) {
   if (
     qid.length === 0 ||
     qid.startsWith('/') ||
+    qid.includes('\\') ||
     qid.includes('\0') ||
+    path.isAbsolute(qid) ||
     segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
   ) {
     throw new ExpectedQuestionPreviewError(
@@ -563,7 +566,7 @@ async function renderQuestionPreviewInRuntime({
 
     if (question.type !== 'Freeform') {
       throw new ExpectedQuestionPreviewError(
-        `Unsupported preview question type: ${question.type ?? 'null'}. Only v3/Freeform questions can be rendered by the preview CLI.`,
+        `Unsupported preview question type: ${question.type ?? 'null'}. Only v3/Freeform questions can be rendered by the local preview server.`,
         {
           data: { qid, questionType: question.type },
           phase: 'metadata',
@@ -611,9 +614,9 @@ async function renderQuestionPreviewInRuntime({
     const preparedVariant = makePreviewVariant(variantSeed, {
       broken: false,
       options: prepareResult.data.options ?? generatedVariant.options,
-      params: prepareResult.data.params ?? generatedVariant.params,
+      params: prepareResult.data.params,
       preferences,
-      true_answer: prepareResult.data.true_answer ?? generatedVariant.true_answer,
+      true_answer: prepareResult.data.true_answer,
     });
 
     phase = 'render';

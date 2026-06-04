@@ -1,20 +1,20 @@
-import http from 'node:http';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import path from 'node:path';
 
 import minimist from 'minimist';
 
+import { discoverInfoDirs } from './discover-info-dirs.js';
+import { APP_ROOT_PATH, REPOSITORY_ROOT_PATH } from './paths.js';
 import {
-  createQuestionPreviewRuntime,
   type QuestionPreviewCacheType,
   type QuestionPreviewDiagnostic,
   type QuestionPreviewPayload,
   type QuestionPreviewRuntime,
   type QuestionPreviewRuntimeOptions,
   type QuestionPreviewWorkersExecutionMode,
+  createQuestionPreviewRuntime,
 } from './question-preview-render.js';
-import { discoverInfoDirs } from './discover-info-dirs.js';
-import { APP_ROOT_PATH, REPOSITORY_ROOT_PATH } from './paths.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4310;
@@ -89,8 +89,8 @@ function parsePositiveInteger(value: string | undefined, flagName: string, defau
   return parsed;
 }
 
-function parseWorkersExecutionMode(value: string | undefined): QuestionPreviewWorkersExecutionMode {
-  const mode = value ?? 'native';
+function parseWorkersExecutionMode(value = 'native'): QuestionPreviewWorkersExecutionMode {
+  const mode = value;
   if (mode !== 'native' && mode !== 'container') {
     throw new Error(
       `Invalid --workers-execution-mode "${mode}". Expected "native" or "container".`,
@@ -99,8 +99,8 @@ function parseWorkersExecutionMode(value: string | undefined): QuestionPreviewWo
   return mode;
 }
 
-function parseCacheType(value: string | undefined): QuestionPreviewCacheType {
-  const cacheType = value ?? 'none';
+function parseCacheType(value = 'none'): QuestionPreviewCacheType {
+  const cacheType = value;
   if (cacheType !== 'none' && cacheType !== 'memory' && cacheType !== 'redis') {
     throw new Error(`Invalid --cache-type "${cacheType}". Expected "none", "memory", or "redis".`);
   }
@@ -133,7 +133,7 @@ async function assertValidCourseDir(courseDir: string) {
     if (!questionsStat.isDirectory()) throw new Error('missing questions directory');
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid --course-dir "${courseDir}": ${detail}`);
+    throw new Error(`Invalid --course-dir "${courseDir}": ${detail}`, { cause: err });
   }
 }
 
@@ -585,11 +585,70 @@ ${payload.bodyHtml}
 </html>`;
 }
 
-function renderDiagnosticDocument(diagnostics: QuestionPreviewDiagnostic[]) {
+const DIAGNOSTIC_EXCERPT_MAX_CHARS = 2000;
+
+function sanitizeBrowserDiagnosticText(value: string, sanitizePaths: string[]) {
+  return sanitizePaths.reduce((result, unsafePath) => {
+    if (unsafePath.length === 0) return result;
+    return result.split(unsafePath).join('<course>');
+  }, value);
+}
+
+function truncateDiagnosticExcerpt(value: string) {
+  if (value.length <= DIAGNOSTIC_EXCERPT_MAX_CHARS) return value;
+  return `${value.slice(0, DIAGNOSTIC_EXCERPT_MAX_CHARS)}\n[truncated]`;
+}
+
+type DiagnosticOutputField = 'outputBoth' | 'stderr' | 'stdout';
+
+function diagnosticDataField(data: unknown, field: DiagnosticOutputField) {
+  if (typeof data !== 'object' || data == null || Array.isArray(data)) return null;
+
+  const value = (data as Record<string, unknown>)[field];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function renderDiagnosticExcerpt({
+  data,
+  field,
+  sanitizePaths,
+}: {
+  data: unknown;
+  field: DiagnosticOutputField;
+  sanitizePaths: string[];
+}) {
+  const value = diagnosticDataField(data, field);
+  if (value == null) return '';
+
+  const label = field === 'outputBoth' ? 'output' : field;
+  const sanitized = sanitizeBrowserDiagnosticText(truncateDiagnosticExcerpt(value), sanitizePaths);
+  return `<details open><summary>${label}</summary><pre>${escapeHtml(sanitized)}</pre></details>`;
+}
+
+function renderDiagnosticDocument(
+  diagnostics: QuestionPreviewDiagnostic[],
+  { sanitizePaths = [] }: { sanitizePaths?: string[] } = {},
+) {
   const items = diagnostics
     .map((diagnostic) => {
       const phase = diagnostic.phase ? `<p>Phase: ${escapeHtml(diagnostic.phase)}</p>` : '';
-      return `<li><strong>${escapeHtml(diagnostic.name)}</strong>${phase}<p>${escapeHtml(diagnostic.message)}</p></li>`;
+      const message = escapeHtml(sanitizeBrowserDiagnosticText(diagnostic.message, sanitizePaths));
+      const output = renderDiagnosticExcerpt({
+        data: diagnostic.data,
+        field: 'outputBoth',
+        sanitizePaths,
+      });
+      const stdout = renderDiagnosticExcerpt({
+        data: diagnostic.data,
+        field: 'stdout',
+        sanitizePaths,
+      });
+      const stderr = renderDiagnosticExcerpt({
+        data: diagnostic.data,
+        field: 'stderr',
+        sanitizePaths,
+      });
+      return `<li><strong>${escapeHtml(diagnostic.name)}</strong>${phase}<p>${message}</p>${output}${stdout}${stderr}</li>`;
     })
     .join('');
 
@@ -740,7 +799,8 @@ async function handleQuestionPreviewRequest({
   runtime: QuestionPreviewRuntime;
 }) {
   const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
-  const qid = qidFromPathname(url.pathname);
+  const pathname = rawRequestPathname(req);
+  const qid = qidFromPathname(pathname);
   if (req.method !== 'GET' || qid == null) {
     sendHtml(res, 404, '<!doctype html><html><body><h1>Not found</h1></body></html>');
     return;
@@ -748,7 +808,7 @@ async function handleQuestionPreviewRequest({
 
   if (!url.searchParams.has('variant')) {
     url.searchParams.set('variant', '1');
-    res.writeHead(302, { location: `${url.pathname}${url.search}` });
+    res.writeHead(302, { location: `${pathname}${url.search}` });
     res.end();
     return;
   }
@@ -763,7 +823,11 @@ async function handleQuestionPreviewRequest({
     return;
   }
 
-  sendHtml(res, 422, renderDiagnosticDocument(result.diagnostics));
+  sendHtml(
+    res,
+    422,
+    renderDiagnosticDocument(result.diagnostics, { sanitizePaths: [options.courseDir] }),
+  );
 }
 
 export async function startQuestionPreviewServer({
@@ -799,7 +863,11 @@ export async function startQuestionPreviewServer({
         name: err instanceof Error ? err.name : 'Error',
         phase: 'render',
       };
-      sendHtml(res, 500, renderDiagnosticDocument([diagnostic]));
+      sendHtml(
+        res,
+        500,
+        renderDiagnosticDocument([diagnostic], { sanitizePaths: [options.courseDir] }),
+      );
     });
   });
 
