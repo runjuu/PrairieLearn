@@ -702,6 +702,10 @@ describe('question preview server asset routes', () => {
           body: /function|window|document/,
           path: '/assets/public/cache/localscripts/question.js',
         },
+        {
+          body: /Bootstrap/,
+          path: '/assets/node_modules/cache/bootstrap/dist/css/bootstrap.min.css',
+        },
         { body: /course asset/, path: '/preview-render/clientFilesCourse/course.css' },
         { body: /element asset/, path: '/preview-render/elements/course-widget/course-widget.css' },
         {
@@ -721,6 +725,45 @@ describe('question preview server asset routes', () => {
         assert.equal(response.status, 200, testCase.path);
         assert.match(body, testCase.body, testCase.path);
       }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns not found for missing core assets without falling through to preview rendering', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: string[] = [];
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push(input.qid);
+          return {
+            diagnostics: [],
+            ok: true,
+            payload: {
+              bodyHtml: '<p>Preview fallback should not render for missing assets</p>',
+              headHtml: '',
+              variant: { seed: input.variantSeed ?? '1' },
+            },
+          };
+        },
+      }),
+    });
+
+    try {
+      const response = await fetch(
+        `${serverUrl(started)}/assets/public/cache/localscripts/does-not-exist.js`,
+        { headers: { origin: 'http://localhost:3000' } },
+      );
+      const body = await response.text();
+
+      assert.equal(response.status, 404);
+      assert.equal(response.headers.get('access-control-allow-origin'), null);
+      nodeAssert.doesNotMatch(body, /Preview fallback/);
+      assert.deepEqual(renderCalls, []);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
