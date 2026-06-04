@@ -709,8 +709,16 @@ describe('question preview server asset routes', () => {
         { body: /course asset/, path: '/preview-render/clientFilesCourse/course.css' },
         { body: /element asset/, path: '/preview-render/elements/course-widget/course-widget.css' },
         {
+          body: /element asset/,
+          path: '/preview-render/cacheableElements/cache/course-widget/course-widget.css',
+        },
+        {
           body: /extension asset/,
           path: '/preview-render/elementExtensions/pl-number-input/course-extension/course-extension.js',
+        },
+        {
+          body: /extension asset/,
+          path: '/preview-render/cacheableElementExtensions/cache/pl-number-input/course-extension/course-extension.js',
         },
         {
           body: /question asset/,
