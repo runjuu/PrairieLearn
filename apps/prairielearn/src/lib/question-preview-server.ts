@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 
 import minimist from 'minimist';
@@ -11,6 +13,8 @@ import {
   type QuestionPreviewDiagnostic,
   type QuestionPreviewPayload,
   type QuestionPreviewRuntime,
+  type QuestionPreviewRuntimeRenderInput,
+  type QuestionPreviewRuntimeRenderOptions,
   type QuestionPreviewRuntimeOptions,
   type QuestionPreviewWorkersExecutionMode,
   createQuestionPreviewRuntime,
@@ -22,6 +26,9 @@ const DEFAULT_QUESTION_TIMEOUT_MS = 5000;
 const DEFAULT_RENDER_TIMEOUT_MS = 10000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
 const DEFAULT_CORS_ORIGINS = ['http://127.0.0.1:3000', 'http://localhost:3000'];
+const GENERATED_FILES_TEMP_PREFIX = 'pl-preview-server-generated-files-';
+const GENERATED_FILES_OWNER_FILE = '.owner.json';
+const activeGeneratedFilesRoots = new Set<string>();
 
 export interface QuestionPreviewServerOptions {
   cacheType: QuestionPreviewCacheType;
@@ -47,6 +54,7 @@ export interface QuestionDiscoveryItem {
 
 export interface StartedQuestionPreviewServer {
   close(): Promise<void>;
+  generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   runtime: QuestionPreviewRuntime;
   server: http.Server;
@@ -237,6 +245,71 @@ function makeRuntimeOptions(options: QuestionPreviewServerOptions): QuestionPrev
   };
 }
 
+function processIsAlive(pid: number) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+async function generatedFilesRootOwnerPid(root: string) {
+  try {
+    const owner = JSON.parse(
+      await fs.readFile(path.join(root, GENERATED_FILES_OWNER_FILE), 'utf8'),
+    ) as unknown;
+    if (typeof owner !== 'object' || owner == null || Array.isArray(owner)) return null;
+    const pid = (owner as Record<string, unknown>).pid;
+    return typeof pid === 'number' ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cleanupStaleGeneratedFilesRoots() {
+  let entries: { isDirectory(): boolean; name: string }[];
+  try {
+    entries = await fs.readdir(os.tmpdir(), { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.isDirectory() || !entry.name.startsWith(GENERATED_FILES_TEMP_PREFIX)) return;
+
+      const root = path.join(os.tmpdir(), entry.name);
+      if (activeGeneratedFilesRoots.has(root)) return;
+
+      const ownerPid = await generatedFilesRootOwnerPid(root);
+      if (ownerPid != null && ownerPid !== process.pid && processIsAlive(ownerPid)) return;
+
+      await fs.rm(root, { force: true, recursive: true }).catch(() => {});
+    }),
+  );
+}
+
+async function createGeneratedFilesRoot() {
+  await cleanupStaleGeneratedFilesRoots();
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), GENERATED_FILES_TEMP_PREFIX));
+  activeGeneratedFilesRoots.add(root);
+  await fs.writeFile(
+    path.join(root, GENERATED_FILES_OWNER_FILE),
+    JSON.stringify({ createdAt: new Date().toISOString(), pid: process.pid }),
+  );
+  return root;
+}
+
+async function removeGeneratedFilesRoot(root: string) {
+  activeGeneratedFilesRoots.delete(root);
+  await fs.rm(root, { force: true, recursive: true }).catch(() => {});
+}
+
 class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
   private currentRuntime: QuestionPreviewRuntime | null;
   private nextRuntimePromise: Promise<QuestionPreviewRuntime> | null = null;
@@ -273,11 +346,14 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
     }
   }
 
-  async render(input: Parameters<QuestionPreviewRuntime['render']>[0]) {
+  async render(
+    input: QuestionPreviewRuntimeRenderInput,
+    options?: QuestionPreviewRuntimeRenderOptions,
+  ) {
     const runtime = await this.getRuntime();
 
     try {
-      return await runtime.render(input);
+      return await runtime.render(input, options);
     } catch (err) {
       await this.discardRuntime(runtime);
       throw err;
@@ -441,7 +517,27 @@ async function resolveBoundedFileFromRoots(roots: string[], pathSegments: string
   return null;
 }
 
-function assetRequestFromPathname(courseDir: string, pathname: string) {
+function isGeneratedFilesRenderId(renderId: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    renderId,
+  );
+}
+
+function assetRequestFromPathname(courseDir: string, generatedFilesRoot: string, pathname: string) {
+  const generatedFilesPrefix = '/preview-render/generatedFilesQuestion/render/';
+  if (pathname.startsWith(generatedFilesPrefix)) {
+    const segments = decodeAssetPathSegments(pathname.slice(generatedFilesPrefix.length));
+    if (segments == null || segments.length < 2) return null;
+
+    const [renderId, ...fileSegments] = segments;
+    if (!isGeneratedFilesRenderId(renderId)) return null;
+
+    return {
+      roots: [path.join(generatedFilesRoot, renderId)],
+      segments: fileSegments,
+    };
+  }
+
   const appNodeModules = path.join(APP_ROOT_PATH, 'node_modules');
   const repoNodeModules = path.join(REPOSITORY_ROOT_PATH, 'node_modules');
   const staticAssetRoutes = [
@@ -539,9 +635,11 @@ function isAssetRoutePathname(pathname: string) {
 
 async function handleAssetRequest({
   options,
+  generatedFilesRoot,
   req,
   res,
 }: {
+  generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   req: http.IncomingMessage;
   res: http.ServerResponse;
@@ -551,7 +649,11 @@ async function handleAssetRequest({
     return;
   }
 
-  const assetRequest = assetRequestFromPathname(options.courseDir, rawRequestPathname(req));
+  const assetRequest = assetRequestFromPathname(
+    options.courseDir,
+    generatedFilesRoot,
+    rawRequestPathname(req),
+  );
   if (assetRequest == null) {
     sendEmpty(res, 404);
     return;
@@ -789,10 +891,12 @@ async function handleQuestionDiscoveryRequest({
 
 async function handleQuestionPreviewRequest({
   options,
+  generatedFilesRoot,
   req,
   res,
   runtime,
 }: {
+  generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   req: http.IncomingMessage;
   res: http.ServerResponse;
@@ -813,10 +917,19 @@ async function handleQuestionPreviewRequest({
     return;
   }
 
-  const result = await runtime.render({
-    qid,
-    variantSeed: url.searchParams.get('variant') ?? '1',
-  });
+  const renderId = crypto.randomUUID();
+  const result = await runtime.render(
+    {
+      qid,
+      variantSeed: url.searchParams.get('variant') ?? '1',
+    },
+    {
+      generatedFiles: {
+        renderId,
+        root: generatedFilesRoot,
+      },
+    },
+  );
 
   if (result.ok) {
     sendHtml(res, 200, renderPreviewDocument(result.payload));
@@ -840,49 +953,92 @@ export async function startQuestionPreviewServer({
   onReady?: (started: StartedQuestionPreviewServer) => void;
 } = {}): Promise<StartedQuestionPreviewServer> {
   const options = await parseQuestionPreviewServerOptions(argv);
+  const generatedFilesRoot = await createGeneratedFilesRoot();
   const runtimeOptions = makeRuntimeOptions(options);
-  const runtime = new ReplaceableQuestionPreviewRuntime(
-    await createRuntime(runtimeOptions),
-    createRuntime,
-    runtimeOptions,
-  );
-  const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
-    const rawPathname = rawRequestPathname(req);
-    const handler =
-      url.pathname === '/api/questions'
-        ? handleQuestionDiscoveryRequest
-        : isAssetRoutePathname(rawPathname)
-          ? handleAssetRequest
-          : handleQuestionPreviewRequest;
+  let runtime: ReplaceableQuestionPreviewRuntime | null = null;
+  let server: http.Server | null = null;
 
-    handler({ options, req, res, runtime }).catch((err) => {
-      const diagnostic: QuestionPreviewDiagnostic = {
-        fatal: true,
-        message: err instanceof Error ? err.message : String(err),
-        name: err instanceof Error ? err.name : 'Error',
-        phase: 'render',
-      };
-      sendHtml(
-        res,
-        500,
-        renderDiagnosticDocument([diagnostic], { sanitizePaths: [options.courseDir] }),
-      );
+  try {
+    const previewRuntime = new ReplaceableQuestionPreviewRuntime(
+      await createRuntime(runtimeOptions),
+      createRuntime,
+      runtimeOptions,
+    );
+    runtime = previewRuntime;
+    server = http.createServer((req, res) => {
+      const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
+      const rawPathname = rawRequestPathname(req);
+      const requestPromise =
+        url.pathname === '/api/questions'
+          ? handleQuestionDiscoveryRequest({ options, req, res })
+          : isAssetRoutePathname(rawPathname)
+            ? handleAssetRequest({ generatedFilesRoot, options, req, res })
+            : handleQuestionPreviewRequest({
+                generatedFilesRoot,
+                options,
+                req,
+                res,
+                runtime: previewRuntime,
+              });
+
+      requestPromise.catch((err) => {
+        const diagnostic: QuestionPreviewDiagnostic = {
+          fatal: true,
+          message: err instanceof Error ? err.message : String(err),
+          name: err instanceof Error ? err.name : 'Error',
+          phase: 'render',
+        };
+        sendHtml(
+          res,
+          500,
+          renderDiagnosticDocument([diagnostic], { sanitizePaths: [options.courseDir] }),
+        );
+      });
     });
-  });
 
-  await listen(server, options.port, options.host);
+    await listen(server, options.port, options.host);
+  } catch (err) {
+    await runtime?.close().catch(() => {});
+    const failedServer = server;
+    if (failedServer != null) {
+      await new Promise<void>((resolve) => failedServer.close(() => resolve()));
+    }
+    await removeGeneratedFilesRoot(generatedFilesRoot);
+    throw err;
+  }
+  if (runtime == null || server == null) {
+    await removeGeneratedFilesRoot(generatedFilesRoot);
+    throw new Error('Preview server startup failed before runtime initialization.');
+  }
+
+  const startedRuntime = runtime;
+  const startedServer = server;
 
   const started: StartedQuestionPreviewServer = {
     async close() {
-      await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
-      });
-      await runtime.close();
+      let closeError: unknown;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          startedServer.close((err) => (err ? reject(err) : resolve()));
+        });
+      } catch (err) {
+        closeError = err;
+      }
+
+      try {
+        await startedRuntime.close();
+      } catch (err) {
+        closeError ??= err;
+      }
+
+      await removeGeneratedFilesRoot(generatedFilesRoot);
+
+      if (closeError != null) throw closeError;
     },
+    generatedFilesRoot,
     options,
-    runtime,
-    server,
+    runtime: startedRuntime,
+    server: startedServer,
   };
   onReady?.(started);
   return started;
