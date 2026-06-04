@@ -52,6 +52,16 @@ async function writeQuestion(courseDir: string, qid: string) {
   await writeQuestionFile(courseDir, qid, 'question.html', '<p>Runtime direct preview body</p>');
 }
 
+async function pathExists(filePath: string) {
+  try {
+    await fs.stat(filePath);
+    return true;
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
 function serverUrl(started: Awaited<ReturnType<typeof startQuestionPreviewServer>>) {
   const address = started.server.address();
   if (address == null || typeof address === 'string') {
@@ -168,6 +178,46 @@ describe('question preview server startup', () => {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }
+  });
+
+  it('cleans stale generated-file temp roots on startup and removes the current root on close', async () => {
+    const courseDir = await makeTempCourse();
+    let tempRootPrefix: string;
+
+    const first = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({ diagnostics: [], ok: false }),
+      }),
+    });
+
+    tempRootPrefix = path.basename(first.generatedFilesRoot).slice(0, -6);
+    await first.close();
+
+    const staleRoot = path.join(os.tmpdir(), `${tempRootPrefix}stale-test`);
+    await fs.mkdir(staleRoot, { recursive: true });
+    await fs.writeFile(path.join(staleRoot, 'leftover.txt'), 'stale generated file');
+
+    const second = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({ diagnostics: [], ok: false }),
+      }),
+    });
+
+    try {
+      assert.equal(await pathExists(staleRoot), false);
+      assert.equal(path.basename(second.generatedFilesRoot).startsWith(tempRootPrefix), true);
+      assert.equal(await pathExists(second.generatedFilesRoot), true);
+    } finally {
+      await second.close();
+      await fs.rm(staleRoot, { force: true, recursive: true });
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+
+    assert.equal(await pathExists(second.generatedFilesRoot), false);
   });
 });
 
@@ -640,6 +690,165 @@ describe('question preview server asset routes', () => {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
       await fs.rm(outsideDir, { force: true, recursive: true });
+    }
+  });
+
+  it('serves generated files through render ID-scoped URLs that keep older renders available', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'runtime/generated-file';
+    await writeQuestionInfo(courseDir, qid, {
+      title: 'Generated file',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111136',
+    });
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<p>Generated file preview</p><pl-file-download file-name="data.txt" type="dynamic" force-download="false"></pl-file-download>',
+    );
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      [
+        'def file(data):',
+        '    if data["filename"] == "data.txt":',
+        '        return "generated file for seed " + str(data["variant_seed"])',
+        '    return "unexpected file"',
+        '',
+      ].join('\n'),
+    );
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const first = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
+      const firstHtml = await first.text();
+      const firstMatch = firstHtml.match(
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/data\.txt)"/,
+      );
+
+      assert.equal(first.status, 200);
+      nodeAssert.doesNotMatch(firstHtml, /generatedFilesQuestion\/variant\/1/);
+      assert.isNotNull(firstMatch);
+      const firstPath = firstMatch?.groups?.path ?? '';
+      const firstRenderId = firstMatch?.groups?.renderId ?? '';
+
+      const firstFile = await fetch(`${baseUrl}${firstPath}`);
+      assert.equal(firstFile.status, 200);
+      assert.equal(await firstFile.text(), 'generated file for seed 1');
+
+      const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
+      const secondHtml = await second.text();
+      const secondMatch = secondHtml.match(
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/data\.txt)"/,
+      );
+
+      assert.equal(second.status, 200);
+      assert.isNotNull(secondMatch);
+      const secondPath = secondMatch?.groups?.path ?? '';
+      const secondRenderId = secondMatch?.groups?.renderId ?? '';
+      assert.notEqual(firstRenderId, secondRenderId);
+
+      const secondFile = await fetch(`${baseUrl}${secondPath}`);
+      assert.equal(secondFile.status, 200);
+      assert.equal(await secondFile.text(), 'generated file for seed 2');
+
+      const oldFirstFile = await fetch(`${baseUrl}${firstPath}`);
+      assert.equal(oldFirstFile.status, 200);
+      assert.equal(await oldFirstFile.text(), 'generated file for seed 1');
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects generated-file render ID mixing and invalid generated-file paths', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'runtime/generated-file-isolation';
+    await writeQuestionInfo(courseDir, qid, {
+      title: 'Generated file isolation',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111137',
+    });
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<pl-file-download file-name="{{params.filename}}" type="dynamic" force-download="false"></pl-file-download>',
+    );
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      [
+        'def generate(data):',
+        '    if data["variant_seed"] == 1:',
+        '        data["params"]["filename"] = "first.txt"',
+        '    else:',
+        '        data["params"]["filename"] = "second.txt"',
+        '',
+        'def file(data):',
+        '    return "generated " + data["filename"]',
+        '',
+      ].join('\n'),
+    );
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const first = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
+      const firstHtml = await first.text();
+      const firstMatch = firstHtml.match(
+        /href="\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/first\.txt"/,
+      );
+      assert.equal(first.status, 200);
+      assert.isNotNull(firstMatch);
+      const firstRenderId = firstMatch?.groups?.renderId ?? '';
+
+      const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
+      const secondHtml = await second.text();
+      const secondMatch = secondHtml.match(
+        /href="\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/second\.txt"/,
+      );
+      assert.equal(second.status, 200);
+      assert.isNotNull(secondMatch);
+      const secondRenderId = secondMatch?.groups?.renderId ?? '';
+      assert.notEqual(firstRenderId, secondRenderId);
+
+      const mixedRenderId = await fetch(
+        `${baseUrl}/preview-render/generatedFilesQuestion/render/${secondRenderId}/first.txt`,
+      );
+      const mixedRenderIdBody = await mixedRenderId.text();
+      assert.notEqual(mixedRenderId.status, 200);
+      nodeAssert.doesNotMatch(mixedRenderIdBody, /generated first/);
+
+      const rejectedPaths = [
+        '/preview-render/generatedFilesQuestion/render/not-a-render-id/first.txt',
+        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/%2e%2e/${secondRenderId}/second.txt`,
+        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/%2Ftmp%2Fsecret.txt`,
+        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/dir%5Csecret.txt`,
+        `/preview-render/generatedFilesQuestion/render/${firstRenderId}//first.txt`,
+      ];
+
+      for (const rejectedPath of rejectedPaths) {
+        const response = await requestRawPath(started, rejectedPath);
+
+        assert.notEqual(response.status, 200, rejectedPath);
+        nodeAssert.doesNotMatch(response.body, /generated first|generated second/, rejectedPath);
+      }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
     }
   });
 });
