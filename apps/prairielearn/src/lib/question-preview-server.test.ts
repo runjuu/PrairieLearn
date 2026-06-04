@@ -6,10 +6,25 @@ import path from 'node:path';
 
 import { assert, describe, it, vi } from 'vitest';
 
+import { createQuestionPreviewRuntime } from './question-preview-render.js';
 import {
   parseQuestionPreviewServerOptions,
   startQuestionPreviewServer,
 } from './question-preview-server.js';
+
+type StartQuestionPreviewServerParams = Parameters<typeof startQuestionPreviewServer>[0];
+type StartTestQuestionPreviewServerParams = Omit<
+  StartQuestionPreviewServerParams,
+  'createRuntime'
+> &
+  Partial<Pick<StartQuestionPreviewServerParams, 'createRuntime'>>;
+
+function startTestQuestionPreviewServer({
+  createRuntime = createQuestionPreviewRuntime,
+  ...params
+}: StartTestQuestionPreviewServerParams) {
+  return startQuestionPreviewServer({ ...params, createRuntime });
+}
 
 async function makeTempCourse() {
   const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-server-'));
@@ -221,7 +236,7 @@ describe('question preview server startup', () => {
       for (const testCase of invalidCases) {
         await nodeAssert.rejects(
           () =>
-            startQuestionPreviewServer({
+            startTestQuestionPreviewServer({
               argv: testCase.argv,
               createRuntime: async () => {
                 runtimeCreations++;
@@ -252,7 +267,7 @@ describe('question preview server startup', () => {
       process.env.PL_PREVIEW_COURSE_DIR = courseDir;
       await nodeAssert.rejects(
         () =>
-          startQuestionPreviewServer({
+          startTestQuestionPreviewServer({
             argv: [],
             createRuntime: async () => {
               events.push('runtime');
@@ -275,7 +290,7 @@ describe('question preview server startup', () => {
 
     await nodeAssert.rejects(
       () =>
-        startQuestionPreviewServer({
+        startTestQuestionPreviewServer({
           argv: ['--course-dir', missingCourseDir],
           createRuntime: async () => {
             events.push('runtime');
@@ -290,16 +305,14 @@ describe('question preview server startup', () => {
     assert.equal(defaultOptions.host, '127.0.0.1');
     assert.equal(defaultOptions.port, 4310);
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
       createRuntime: async (options) => {
         events.push(`runtime:${options.courseDir}:${options.prewarmWorkers}`);
         return { close: async () => {}, render: async () => ({ diagnostics: [], ok: false }) };
       },
-      onReady: () => {
-        events.push('ready');
-      },
     });
+    events.push('ready');
 
     try {
       const address = started.server.address();
@@ -321,7 +334,7 @@ describe('question preview server startup', () => {
     const courseDir = await makeTempCourse();
     let tempRootPrefix: string;
 
-    const first = await startQuestionPreviewServer({
+    const first = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -336,7 +349,7 @@ describe('question preview server startup', () => {
     await fs.mkdir(staleRoot, { recursive: true });
     await fs.writeFile(path.join(staleRoot, 'leftover.txt'), 'stale generated file');
 
-    const second = await startQuestionPreviewServer({
+    const second = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -380,7 +393,7 @@ describe('question preview server asset routes', () => {
       'question asset',
     );
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -435,7 +448,7 @@ describe('question preview server asset routes', () => {
   it('returns not found for missing core assets without falling through to preview rendering', async () => {
     const courseDir = await makeTempCourse();
     const renderCalls: string[] = [];
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -491,7 +504,7 @@ describe('question preview server asset routes', () => {
       '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
     );
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
     });
 
@@ -531,7 +544,7 @@ describe('question preview server asset routes', () => {
       'question asset through files qid',
     );
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -574,7 +587,7 @@ describe('question preview server asset routes', () => {
       path.join(courseDir, 'clientFilesCourse', 'linked-secret.txt'),
     );
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -643,7 +656,7 @@ describe('question preview server asset routes', () => {
       ].join('\n'),
     );
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
     });
 
@@ -726,7 +739,7 @@ describe('question preview server asset routes', () => {
       ].join('\n'),
     );
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
     });
 
@@ -794,7 +807,7 @@ describe('question preview server direct preview route', () => {
   it('redirects missing variants and renders a full HTML document for direct question URLs', async () => {
     const courseDir = await makeTempCourse();
     const renderCalls: { qid: string; variantSeed?: string }[] = [];
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -843,7 +856,7 @@ describe('question preview server direct preview route', () => {
 
   it('keeps direct preview pages free of server controls and has no JSON render endpoint', async () => {
     const courseDir = await makeTempCourse();
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -889,7 +902,7 @@ describe('question preview server direct preview route', () => {
 
   it('does not expose assessment backend routes', async () => {
     const courseDir = await makeTempCourse();
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -938,7 +951,7 @@ describe('question preview server direct preview route', () => {
     const longStderr = `stderr first line from ${courseDir}\n${'y'.repeat(5000)}\nstderr hidden tail`;
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -994,7 +1007,7 @@ describe('question preview server direct preview route', () => {
   it('rejects invalid qid path forms before invoking the runtime', async () => {
     const courseDir = await makeTempCourse();
     const renderCalls: string[] = [];
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
@@ -1034,7 +1047,7 @@ describe('question preview server direct preview route', () => {
 
   it('rejects invalid qid path forms with generic error pages', async () => {
     const courseDir = await makeTempCourse();
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
     });
 
@@ -1062,7 +1075,7 @@ describe('question preview server direct preview route', () => {
     let runtimeCount = 0;
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => {
         const runtimeId = ++runtimeCount;
@@ -1132,7 +1145,7 @@ describe('question preview server direct preview route', () => {
     let runtimeCount = 0;
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => {
         const runtimeId = ++runtimeCount;
@@ -1189,7 +1202,7 @@ describe('question preview server direct preview route', () => {
   it('serves direct preview HTML rendered through the PrairieLearn runtime', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestion(courseDir, 'runtime/simple');
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
     });
 
@@ -1244,7 +1257,7 @@ describe('question preview server direct preview route', () => {
     await writeServer('server edit one');
 
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const started = await startQuestionPreviewServer({
+    const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--cache-type', 'memory', '--port', '0'],
     });
 
