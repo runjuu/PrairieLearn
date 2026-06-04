@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import nodeAssert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +28,12 @@ async function writeQuestionFile(
   await fs.writeFile(path.join(questionDir, filename), contents);
 }
 
+async function writeCourseFile(courseDir: string, filename: string, contents: string) {
+  const fullPath = path.join(courseDir, filename);
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  await fs.writeFile(fullPath, contents);
+}
+
 async function writeQuestionInfo(
   courseDir: string,
   qid: string,
@@ -51,6 +58,40 @@ function serverUrl(started: Awaited<ReturnType<typeof startQuestionPreviewServer
     throw new Error('Expected preview server to listen on a TCP address.');
   }
   return `http://${address.address}:${address.port}`;
+}
+
+async function requestRawPath(
+  started: Awaited<ReturnType<typeof startQuestionPreviewServer>>,
+  requestPath: string,
+) {
+  const address = started.server.address();
+  if (address == null || typeof address === 'string') {
+    throw new Error('Expected preview server to listen on a TCP address.');
+  }
+
+  return new Promise<{ body: string; status: number }>((resolve, reject) => {
+    const req = http.request(
+      {
+        host: address.address,
+        method: 'GET',
+        path: requestPath,
+        port: address.port,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on('error', reject);
+        res.on('end', () => {
+          resolve({
+            body: Buffer.concat(chunks).toString('utf8'),
+            status: res.statusCode ?? 0,
+          });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 describe('question preview server startup', () => {
@@ -392,6 +433,213 @@ describe('question preview server discovery API', () => {
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+});
+
+describe('question preview server asset routes', () => {
+  it('serves ordinary PrairieLearn, course, element, extension, and question-local assets', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'unit/assets', {
+      title: 'Asset question',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111132',
+    });
+    await writeCourseFile(courseDir, 'clientFilesCourse/course.css', 'course asset');
+    await writeCourseFile(courseDir, 'elements/course-widget/course-widget.css', 'element asset');
+    await writeCourseFile(
+      courseDir,
+      'elementExtensions/pl-number-input/course-extension/course-extension.js',
+      'extension asset',
+    );
+    await writeCourseFile(
+      courseDir,
+      'questions/unit/assets/clientFilesQuestion/question.txt',
+      'question asset',
+    );
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({ diagnostics: [], ok: false }),
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const cases = [
+        {
+          body: /function|window|document/,
+          path: '/assets/public/cache/localscripts/question.js',
+        },
+        { body: /course asset/, path: '/preview-render/clientFilesCourse/course.css' },
+        { body: /element asset/, path: '/preview-render/elements/course-widget/course-widget.css' },
+        {
+          body: /extension asset/,
+          path: '/preview-render/elementExtensions/pl-number-input/course-extension/course-extension.js',
+        },
+        {
+          body: /question asset/,
+          path: '/preview-render/questions/unit/assets/files/question.txt',
+        },
+      ];
+
+      for (const testCase of cases) {
+        const response = await fetch(`${baseUrl}${testCase.path}`);
+        const body = await response.text();
+
+        assert.equal(response.status, 200, testCase.path);
+        assert.match(body, testCase.body, testCase.path);
+      }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('renders question-local asset URLs with the qid separated from the file path', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'unit/asset-links', {
+      title: 'Asset links',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111133',
+    });
+    await writeQuestionFile(
+      courseDir,
+      'unit/asset-links',
+      'question.html',
+      '<pl-figure file-name="diagram.svg" alt="Diagram"></pl-figure>',
+    );
+    await writeCourseFile(
+      courseDir,
+      'questions/unit/asset-links/clientFilesQuestion/diagram.svg',
+      '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    );
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const response = await fetch(`${baseUrl}/questions/unit/asset-links?variant=1`);
+      const html = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(
+        html,
+        /src="\/preview-render\/questions\/unit\/asset-links\/files\/diagram\.svg"/,
+      );
+
+      const asset = await fetch(
+        `${baseUrl}/preview-render/questions/unit/asset-links/files/diagram.svg`,
+      );
+      assert.equal(asset.status, 200);
+      assert.match(await asset.text(), /<svg/);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('serves question-local assets when the qid contains a files path segment', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'unit/files/assets', {
+      title: 'Files segment question',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111135',
+    });
+    await writeCourseFile(
+      courseDir,
+      'questions/unit/files/assets/clientFilesQuestion/question.txt',
+      'question asset through files qid',
+    );
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({ diagnostics: [], ok: false }),
+      }),
+    });
+
+    try {
+      const response = await fetch(
+        `${serverUrl(started)}/preview-render/questions/unit/files/assets/files/question.txt`,
+      );
+      const body = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(body, /question asset through files qid/);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects asset traversal, symlinks, invalid paths, and category mixing', async () => {
+    const courseDir = await makeTempCourse();
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-server-outside-'));
+    await writeQuestionInfo(courseDir, 'unit/assets', {
+      title: 'Asset isolation',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111134',
+    });
+    await writeCourseFile(courseDir, 'clientFilesCourse/course.txt', 'course asset');
+    await writeCourseFile(
+      courseDir,
+      'questions/unit/assets/clientFilesQuestion/question.txt',
+      'question asset',
+    );
+    await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'outside secret');
+    await fs.symlink(
+      path.join(outsideDir, 'secret.txt'),
+      path.join(courseDir, 'clientFilesCourse', 'linked-secret.txt'),
+    );
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({ diagnostics: [], ok: false }),
+      }),
+    });
+
+    try {
+      const rejectedPaths = [
+        '/assets/public/cache/%2e%2e/package.json',
+        '/preview-render/clientFilesCourse/%2e%2e/questions/unit/assets/clientFilesQuestion/question.txt',
+        '/preview-render/clientFilesCourse/%2Ftmp%2Fsecret.txt',
+        '/preview-render/clientFilesCourse/dir%5Csecret.txt',
+        '/preview-render/clientFilesCourse//course.txt',
+        '/preview-render/clientFilesCourse/linked-secret.txt',
+        '/preview-render/clientFilesCourse/question.txt',
+        '/preview-render/questions/unit/assets/files/%2e%2e/course.txt',
+        '/preview-render/questions/%2e%2e/assets/files/question.txt',
+        '/preview-render/questions/unit/assets/files/course.txt',
+        '/preview-render/elements/%2e%2e/clientFilesCourse/course.txt',
+        '/preview-render/elementExtensions/%2e%2e/clientFilesCourse/course.txt',
+      ];
+
+      for (const rejectedPath of rejectedPaths) {
+        const response = await requestRawPath(started, rejectedPath);
+
+        assert.notEqual(response.status, 200, rejectedPath);
+        nodeAssert.doesNotMatch(
+          response.body,
+          /outside secret|course asset|question asset/,
+          rejectedPath,
+        );
+      }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+      await fs.rm(outsideDir, { force: true, recursive: true });
     }
   });
 });

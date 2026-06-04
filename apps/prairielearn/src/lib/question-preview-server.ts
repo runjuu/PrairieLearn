@@ -14,6 +14,7 @@ import {
   type QuestionPreviewWorkersExecutionMode,
 } from './question-preview-render.js';
 import { discoverInfoDirs } from './discover-info-dirs.js';
+import { APP_ROOT_PATH, REPOSITORY_ROOT_PATH } from './paths.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4310;
@@ -326,6 +327,250 @@ function sendJson(
   res.end(JSON.stringify(body));
 }
 
+function sendEmpty(res: http.ServerResponse, statusCode: number) {
+  res.writeHead(statusCode, {
+    'cache-control': 'no-store',
+  });
+  res.end();
+}
+
+function contentTypeForPath(filePath: string) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.gif':
+      return 'image/gif';
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.ico':
+      return 'image/x-icon';
+    case '.jpeg':
+    case '.jpg':
+      return 'image/jpeg';
+    case '.js':
+    case '.mjs':
+      return 'text/javascript; charset=utf-8';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.png':
+      return 'image/png';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.txt':
+      return 'text/plain; charset=utf-8';
+    case '.woff':
+      return 'font/woff';
+    case '.woff2':
+      return 'font/woff2';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function decodeAssetPathSegments(encodedPath: string) {
+  if (encodedPath.length === 0) return null;
+
+  const segments = encodedPath.split('/');
+  if (segments.length === 0) return null;
+
+  const decodedSegments: string[] = [];
+  for (const segment of segments) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+
+    if (
+      decoded.length === 0 ||
+      decoded === '.' ||
+      decoded === '..' ||
+      decoded.includes('\0') ||
+      decoded.includes('/') ||
+      decoded.includes('\\') ||
+      path.isAbsolute(decoded)
+    ) {
+      return null;
+    }
+
+    decodedSegments.push(decoded);
+  }
+
+  return decodedSegments;
+}
+
+function isPathInsideRoot(root: string, filePath: string) {
+  const relativePath = path.relative(root, filePath);
+  return (
+    relativePath.length === 0 || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+  );
+}
+
+async function resolveBoundedFile(rootInput: string, pathSegments: string[]) {
+  const root = path.resolve(rootInput);
+  const filePath = path.resolve(root, ...pathSegments);
+  if (!isPathInsideRoot(root, filePath)) return null;
+
+  let currentPath = root;
+  const rootStat = await fs.lstat(currentPath);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return null;
+
+  let fileStat = rootStat;
+  for (const segment of pathSegments) {
+    currentPath = path.join(currentPath, segment);
+    fileStat = await fs.lstat(currentPath);
+    if (fileStat.isSymbolicLink()) return null;
+  }
+
+  if (!fileStat.isFile()) return null;
+  return filePath;
+}
+
+async function resolveBoundedFileFromRoots(roots: string[], pathSegments: string[]) {
+  for (const root of roots) {
+    try {
+      const filePath = await resolveBoundedFile(root, pathSegments);
+      if (filePath != null) return filePath;
+    } catch (err) {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') continue;
+      throw err;
+    }
+  }
+
+  return null;
+}
+
+function assetRequestFromPathname(courseDir: string, pathname: string) {
+  const appNodeModules = path.join(APP_ROOT_PATH, 'node_modules');
+  const repoNodeModules = path.join(REPOSITORY_ROOT_PATH, 'node_modules');
+  const staticAssetRoutes = [
+    {
+      prefix: '/assets/build/',
+      roots: [path.join(APP_ROOT_PATH, 'public', 'build')],
+      stripCachebuster: false,
+    },
+    {
+      prefix: '/assets/public/',
+      roots: [path.join(APP_ROOT_PATH, 'public')],
+      stripCachebuster: true,
+    },
+    {
+      prefix: '/assets/node_modules/',
+      roots: [appNodeModules, repoNodeModules],
+      stripCachebuster: true,
+    },
+    {
+      prefix: '/assets/elements/',
+      roots: [path.join(APP_ROOT_PATH, 'elements')],
+      stripCachebuster: true,
+    },
+    {
+      prefix: '/preview-render/clientFilesCourse/',
+      roots: [path.join(courseDir, 'clientFilesCourse')],
+      stripCachebuster: false,
+    },
+    {
+      prefix: '/preview-render/elements/',
+      roots: [path.join(courseDir, 'elements')],
+      stripCachebuster: false,
+    },
+    {
+      prefix: '/preview-render/cacheableElements/',
+      roots: [path.join(courseDir, 'elements')],
+      stripCachebuster: true,
+    },
+    {
+      prefix: '/preview-render/elementExtensions/',
+      roots: [path.join(courseDir, 'elementExtensions')],
+      stripCachebuster: false,
+    },
+    {
+      prefix: '/preview-render/cacheableElementExtensions/',
+      roots: [path.join(courseDir, 'elementExtensions')],
+      stripCachebuster: true,
+    },
+  ];
+
+  for (const route of staticAssetRoutes) {
+    if (!pathname.startsWith(route.prefix)) continue;
+
+    const segments = decodeAssetPathSegments(pathname.slice(route.prefix.length));
+    if (segments == null) return null;
+
+    const fileSegments = route.stripCachebuster ? segments.slice(1) : segments;
+    if (fileSegments.length === 0) return null;
+
+    return {
+      roots: route.roots,
+      segments: fileSegments,
+    };
+  }
+
+  const questionFilesPrefix = '/preview-render/questions/';
+  if (pathname.startsWith(questionFilesPrefix)) {
+    const segments = decodeAssetPathSegments(pathname.slice(questionFilesPrefix.length));
+    if (segments == null) return null;
+
+    const filesSegmentIndex = segments.lastIndexOf('files');
+    if (filesSegmentIndex <= 0 || filesSegmentIndex === segments.length - 1) return null;
+
+    const qidSegments = segments.slice(0, filesSegmentIndex);
+    const fileSegments = segments.slice(filesSegmentIndex + 1);
+
+    return {
+      roots: [path.join(courseDir, 'questions', ...qidSegments, 'clientFilesQuestion')],
+      segments: fileSegments,
+    };
+  }
+
+  return null;
+}
+
+function rawRequestPathname(req: http.IncomingMessage) {
+  const rawUrl = req.url ?? '/';
+  const queryStart = rawUrl.search(/[?#]/);
+  return queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
+}
+
+function isAssetRoutePathname(pathname: string) {
+  return pathname.startsWith('/assets/') || pathname.startsWith('/preview-render/');
+}
+
+async function handleAssetRequest({
+  options,
+  req,
+  res,
+}: {
+  options: QuestionPreviewServerOptions;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+}) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendEmpty(res, 405);
+    return;
+  }
+
+  const assetRequest = assetRequestFromPathname(options.courseDir, rawRequestPathname(req));
+  if (assetRequest == null) {
+    sendEmpty(res, 404);
+    return;
+  }
+
+  const filePath = await resolveBoundedFileFromRoots(assetRequest.roots, assetRequest.segments);
+  if (filePath == null) {
+    sendEmpty(res, 404);
+    return;
+  }
+
+  const contents = req.method === 'HEAD' ? null : await fs.readFile(filePath);
+  res.writeHead(200, {
+    'cache-control': 'no-store',
+    'content-type': contentTypeForPath(filePath),
+  });
+  res.end(contents);
+}
+
 function renderPreviewDocument(payload: QuestionPreviewPayload) {
   return `<!doctype html>
 <html>
@@ -539,10 +784,13 @@ export async function startQuestionPreviewServer({
   );
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
+    const rawPathname = rawRequestPathname(req);
     const handler =
       url.pathname === '/api/questions'
         ? handleQuestionDiscoveryRequest
-        : handleQuestionPreviewRequest;
+        : isAssetRoutePathname(rawPathname)
+          ? handleAssetRequest
+          : handleQuestionPreviewRequest;
 
     handler({ options, req, res, runtime }).catch((err) => {
       const diagnostic: QuestionPreviewDiagnostic = {

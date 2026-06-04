@@ -61,10 +61,11 @@ describe('question preview renderer helpers', () => {
   });
 
   it('creates preview render locals without assessment or submission routes', () => {
-    const locals = makePreviewLocals('/preview');
+    const locals = makePreviewLocals('/preview', 'demo/preview');
 
     assert.equal(locals.questionUrl, '/preview/question/1/');
     assert.equal(locals.clientFilesCourseUrl, '/preview/clientFilesCourse');
+    assert.equal(locals.clientFilesQuestionUrl, '/preview/questions/demo/preview/files');
     assert.equal(
       locals.clientFilesQuestionGeneratedFileUrl,
       '/preview/generatedFilesQuestion/variant/1',
