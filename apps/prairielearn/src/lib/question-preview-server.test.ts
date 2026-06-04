@@ -4,7 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import { assert, describe, it } from 'vitest';
+import { assert, describe, it, vi } from 'vitest';
 
 import {
   parseQuestionPreviewServerOptions,
@@ -1239,10 +1239,11 @@ describe('question preview server direct preview route', () => {
     }
   });
 
-  it('returns bounded sanitized HTML diagnostics instead of negotiating JSON', async () => {
+  it('returns a generic HTML error and logs render failure details instead of negotiating JSON', async () => {
     const courseDir = await makeTempCourse();
     const longOutput = `combined output first line\n${'x'.repeat(5000)}\ncombined output hidden tail`;
     const longStderr = `stderr first line from ${courseDir}\n${'y'.repeat(5000)}\nstderr hidden tail`;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const started = await startQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
@@ -1277,16 +1278,21 @@ describe('question preview server direct preview route', () => {
 
       assert.equal(response.status, 422);
       assert.match(response.headers.get('content-type') ?? '', /text\/html/);
-      assert.match(html, /CourseIssueError/);
-      assert.match(html, /Phase: generate/);
-      assert.match(html, /Render failed while reading/);
-      assert.match(html, /combined output first line/);
-      assert.match(html, /stderr first line/);
+      assert.match(html, /Question preview failed/);
+      assert.match(html, /preview server console/);
+      nodeAssert.doesNotMatch(html, /CourseIssueError/);
+      nodeAssert.doesNotMatch(html, /Phase: generate/);
+      nodeAssert.doesNotMatch(html, /Render failed while reading/);
+      nodeAssert.doesNotMatch(html, /combined output first line/);
+      nodeAssert.doesNotMatch(html, /stderr first line/);
       nodeAssert.doesNotMatch(html, new RegExp(courseDir.replaceAll('/', '\\/')));
-      nodeAssert.doesNotMatch(html, /combined output hidden tail|stderr hidden tail/);
       nodeAssert.doesNotMatch(html, /SECRET_TOKEN|shh|full question source|at render/);
-      assert.isBelow(html.length, 7000);
+      assert.isBelow(html.length, 1000);
+      assert.equal(consoleError.mock.calls.length, 1);
+      assert.equal(consoleError.mock.calls[0]?.[0], 'Question preview render failed:');
+      assert.include(JSON.stringify(consoleError.mock.calls[0]?.[1]), 'CourseIssueError');
     } finally {
+      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }
@@ -1322,7 +1328,8 @@ describe('question preview server direct preview route', () => {
         const response = await requestRawPath(started, invalidPath);
 
         assert.equal(response.status, 422, invalidPath);
-        assert.match(response.body, /Invalid question id/, invalidPath);
+        assert.match(response.body, /Question preview failed/, invalidPath);
+        nodeAssert.doesNotMatch(response.body, /Invalid question id/, invalidPath);
         nodeAssert.doesNotMatch(response.body, /Permissive runtime/, invalidPath);
       }
       assert.deepEqual(renderCalls, []);
@@ -1332,7 +1339,7 @@ describe('question preview server direct preview route', () => {
     }
   });
 
-  it('rejects invalid qid path forms with diagnostic pages', async () => {
+  it('rejects invalid qid path forms with generic error pages', async () => {
     const courseDir = await makeTempCourse();
     const started = await startQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
@@ -1346,7 +1353,8 @@ describe('question preview server direct preview route', () => {
         const response = await requestRawPath(started, invalidPath);
 
         assert.equal(response.status, 422, invalidPath);
-        assert.match(response.body, /Invalid question id/, invalidPath);
+        assert.match(response.body, /Question preview failed/, invalidPath);
+        nodeAssert.doesNotMatch(response.body, /Invalid question id/, invalidPath);
         nodeAssert.doesNotMatch(response.body, /missing info\.json/, invalidPath);
       }
     } finally {
@@ -1359,6 +1367,7 @@ describe('question preview server direct preview route', () => {
     const courseDir = await makeTempCourse();
     const renderCalls: { qid: string; runtimeId: number; variantSeed?: string }[] = [];
     let runtimeCount = 0;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const started = await startQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
@@ -1402,7 +1411,10 @@ describe('question preview server direct preview route', () => {
       const diagnosticHtml = await diagnostic.text();
 
       assert.equal(diagnostic.status, 422);
-      assert.match(diagnosticHtml, /Unsupported question type from edited info\.json/);
+      assert.match(diagnosticHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(diagnosticHtml, /Unsupported question type from edited info\.json/);
+      assert.equal(consoleError.mock.calls.length, 1);
+      assert.include(JSON.stringify(consoleError.mock.calls[0]?.[1]), 'ExpectedPreviewFailure');
 
       const refresh = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
       const refreshHtml = await refresh.text();
@@ -1415,6 +1427,7 @@ describe('question preview server direct preview route', () => {
         { qid: 'demo/example', runtimeId: 1, variantSeed: '1' },
       ]);
     } finally {
+      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }
@@ -1424,6 +1437,7 @@ describe('question preview server direct preview route', () => {
     const courseDir = await makeTempCourse();
     const closedRuntimeIds: number[] = [];
     let runtimeCount = 0;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const started = await startQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
@@ -1458,7 +1472,11 @@ describe('question preview server direct preview route', () => {
       const failedHtml = await failed.text();
 
       assert.equal(failed.status, 500);
-      assert.match(failedHtml, /preview runtime crashed/);
+      assert.match(failedHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(failedHtml, /preview runtime crashed/);
+      assert.equal(consoleError.mock.calls.length, 1);
+      assert.equal(consoleError.mock.calls[0]?.[0], 'Question preview request failed:');
+      assert.include(String(consoleError.mock.calls[0]?.[1]), 'preview runtime crashed');
       assert.deepEqual(closedRuntimeIds, [1]);
 
       const refresh = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
@@ -1468,6 +1486,7 @@ describe('question preview server direct preview route', () => {
       assert.match(refreshHtml, /Recovered on runtime 2/);
       assert.equal(runtimeCount, 2);
     } finally {
+      consoleError.mockRestore();
       await started.close();
       assert.deepEqual(closedRuntimeIds, [1, 2]);
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -1531,6 +1550,7 @@ describe('question preview server direct preview route', () => {
     );
     await writeServer('server edit one');
 
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const started = await startQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--cache-type', 'memory', '--port', '0'],
     });
@@ -1565,7 +1585,12 @@ describe('question preview server direct preview route', () => {
       const metadataRefreshBody = await metadataRefresh.text();
 
       assert.equal(metadataRefresh.status, 422);
-      assert.match(metadataRefreshBody, /Unsupported preview question type: MultipleChoice/);
+      assert.match(metadataRefreshBody, /Question preview failed/);
+      nodeAssert.doesNotMatch(
+        metadataRefreshBody,
+        /Unsupported preview question type: MultipleChoice/,
+      );
+      assert.isAtLeast(consoleError.mock.calls.length, 1);
 
       await writeInfo('v3');
       await writeServer('server edit two');
@@ -1578,6 +1603,7 @@ describe('question preview server direct preview route', () => {
       assert.match(serverRefreshBody, /server edit two/);
       nodeAssert.doesNotMatch(serverRefreshBody, /server edit one/);
     } finally {
+      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }
