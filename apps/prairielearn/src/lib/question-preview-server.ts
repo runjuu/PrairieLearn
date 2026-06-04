@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import http from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -23,7 +23,6 @@ import {
   type QuestionPreviewRuntimeRenderInput,
   type QuestionPreviewRuntimeRenderOptions,
   type QuestionPreviewRuntimeOptions,
-  createQuestionPreviewRuntime,
 } from './question-preview-render.js';
 
 const GENERATED_FILES_TEMP_PREFIX = 'pl-preview-server-generated-files-';
@@ -37,20 +36,28 @@ export interface StartedQuestionPreviewServer {
   generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   runtime: QuestionPreviewRuntime;
-  server: http.Server;
+  server: Server;
 }
 
+type QuestionPreviewRuntimeFactory = (
+  options: QuestionPreviewRuntimeOptions,
+) => Promise<QuestionPreviewRuntime>;
+
 /**
- * Binds the HTTP server and resolves once the server is accepting requests.
+ * Resolves once the server returned by Express is accepting requests.
  *
- * @param server - The Node HTTP server instance to start.
- * @param port - The TCP port to bind.
- * @param host - The host/interface to bind.
+ * @param server - The Node HTTP server instance returned by `app.listen`.
  */
-function listen(server: http.Server, port: number, host: string) {
+function waitForListening(server: Server) {
   return new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, host, () => {
+    if (server.listening) {
+      server.off('error', reject);
+      resolve();
+      return;
+    }
+
+    server.once('listening', () => {
       server.off('error', reject);
       resolve();
     });
@@ -179,9 +186,7 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
    */
   constructor(
     initialRuntime: QuestionPreviewRuntime,
-    private readonly createRuntime: (
-      options: QuestionPreviewRuntimeOptions,
-    ) => Promise<QuestionPreviewRuntime>,
+    private readonly createRuntime: QuestionPreviewRuntimeFactory,
     private readonly runtimeOptions: QuestionPreviewRuntimeOptions,
   ) {
     this.currentRuntime = initialRuntime;
@@ -493,7 +498,7 @@ function startupCourseAssetRequestFromPathname(
  *
  * @param req - Incoming HTTP request.
  */
-function rawRequestPathname(req: http.IncomingMessage) {
+function rawRequestPathname(req: IncomingMessage) {
   const rawUrl = req.url ?? '/';
   const queryStart = rawUrl.search(/[?#]/);
   return queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
@@ -643,26 +648,26 @@ function invalidQuestionPreviewQid(qid: string) {
   );
 }
 
-/**
- * Handles direct question preview URLs and renders the requested question.
- *
- * @param params - Direct preview request inputs.
- * @param params.generatedFilesRoot - Temp root for files produced by the render.
- * @param params.options - Preview-server options, including host, port, and course.
- * @param params.req - Incoming preview request.
- * @param params.res - Express response object.
- * @param params.runtime - Runtime used to render the question.
- */
-async function handleQuestionPreviewRequest(params: {
+interface HandleQuestionPreviewRequestParams {
   generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   qid: string;
   req: Request;
   res: Response;
   runtime: QuestionPreviewRuntime;
-}) {
-  const { generatedFilesRoot, options, qid, req, res, runtime } = params;
+}
 
+/**
+ * Handles direct question preview URLs and renders the requested question.
+ */
+async function handleQuestionPreviewRequest({
+  generatedFilesRoot,
+  options,
+  qid,
+  req,
+  res,
+  runtime,
+}: HandleQuestionPreviewRequestParams) {
   const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
   if (invalidQuestionPreviewQid(qid)) {
     res.status(422).type('html').send(renderPreviewErrorDocument());
@@ -719,22 +724,21 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
   };
 }
 
-/**
- * Creates the Express app that serves direct previews, core assets, course
- * assets, and generated files.
- *
- * @param params - Express app dependencies.
- * @param params.generatedFilesRoot - Temp root for generated preview files.
- * @param params.options - Validated preview-server options.
- * @param params.runtime - Runtime used by direct preview routes.
- */
-function createQuestionPreviewApp(params: {
+interface CreateQuestionPreviewAppParams {
   generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   runtime: QuestionPreviewRuntime;
-}) {
-  const { generatedFilesRoot, options, runtime } = params;
+}
 
+/**
+ * Creates the Express app that serves direct previews, core assets, course
+ * assets, and generated files.
+ */
+function createQuestionPreviewApp({
+  generatedFilesRoot,
+  options,
+  runtime,
+}: CreateQuestionPreviewAppParams) {
   const app = express();
   app.disable('x-powered-by');
   app.enable('strict routing');
@@ -771,33 +775,24 @@ function createQuestionPreviewApp(params: {
   return app;
 }
 
+interface StartQuestionPreviewServerParams {
+  argv: string[];
+  createRuntime: QuestionPreviewRuntimeFactory;
+}
+
 /**
  * Parses options, creates the preview runtime, starts the HTTP server, and
  * returns a handle that can cleanly close everything it owns.
- *
- * @param params - Startup dependencies and overrides.
- * @param params.argv - CLI-style arguments to parse; defaults to `process.argv`.
- * @param params.createRuntime - Runtime factory, injectable for tests.
- * @param params.onReady - Optional callback invoked after the server is bound.
  */
-export async function startQuestionPreviewServer(
-  params: {
-    argv?: string[];
-    createRuntime?: (options: QuestionPreviewRuntimeOptions) => Promise<QuestionPreviewRuntime>;
-    onReady?: (started: StartedQuestionPreviewServer) => void;
-  } = {},
-): Promise<StartedQuestionPreviewServer> {
-  const {
-    argv = process.argv.slice(2),
-    createRuntime = createQuestionPreviewRuntime,
-    onReady,
-  } = params;
-
+export async function startQuestionPreviewServer({
+  argv,
+  createRuntime,
+}: StartQuestionPreviewServerParams): Promise<StartedQuestionPreviewServer> {
   const options = await parseQuestionPreviewServerOptions(argv);
   const generatedFilesRoot = await createGeneratedFilesRoot();
   const runtimeOptions = makeRuntimeOptions(options);
   let runtime: ReplaceableQuestionPreviewRuntime | null = null;
-  let server: http.Server | null = null;
+  let server: Server | null = null;
 
   try {
     const previewRuntime = new ReplaceableQuestionPreviewRuntime(
@@ -807,15 +802,12 @@ export async function startQuestionPreviewServer(
     );
     runtime = previewRuntime;
     await assets.init();
-    server = http.createServer(
-      createQuestionPreviewApp({
-        generatedFilesRoot,
-        options,
-        runtime: previewRuntime,
-      }),
-    );
-
-    await listen(server, options.port, options.host);
+    server = createQuestionPreviewApp({
+      generatedFilesRoot,
+      options,
+      runtime: previewRuntime,
+    }).listen(options.port, options.host);
+    await waitForListening(server);
   } catch (err) {
     await runtime?.close().catch(() => {});
     const failedServer = server;
@@ -825,6 +817,7 @@ export async function startQuestionPreviewServer(
     await removeGeneratedFilesRoot(generatedFilesRoot);
     throw err;
   }
+
   if (runtime == null || server == null) {
     await removeGeneratedFilesRoot(generatedFilesRoot);
     throw new Error('Preview server startup failed before runtime initialization.');
@@ -859,6 +852,5 @@ export async function startQuestionPreviewServer(
     runtime: startedRuntime,
     server: startedServer,
   };
-  onReady?.(started);
   return started;
 }
