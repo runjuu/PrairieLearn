@@ -1195,6 +1195,46 @@ describe('question preview server direct preview route', () => {
     }
   });
 
+  it('rejects invalid qid path forms before invoking the runtime', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: string[] = [];
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push(input.qid);
+          return {
+            diagnostics: [],
+            ok: true,
+            payload: {
+              bodyHtml: '<p>Permissive runtime rendered invalid qid</p>',
+              headHtml: '',
+              variant: { seed: input.variantSeed ?? '1' },
+            },
+          };
+        },
+      }),
+    });
+
+    try {
+      for (const invalidPath of [
+        '/questions/demo%5Cexample?variant=1',
+        '/questions/%2e%2e/secret?variant=1',
+      ]) {
+        const response = await requestRawPath(started, invalidPath);
+
+        assert.equal(response.status, 422, invalidPath);
+        assert.match(response.body, /Invalid question id/, invalidPath);
+        nodeAssert.doesNotMatch(response.body, /Permissive runtime/, invalidPath);
+      }
+      assert.deepEqual(renderCalls, []);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('rejects invalid qid path forms with diagnostic pages', async () => {
     const courseDir = await makeTempCourse();
     const started = await startQuestionPreviewServer({
