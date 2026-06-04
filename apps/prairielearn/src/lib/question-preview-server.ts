@@ -795,62 +795,60 @@ export async function startQuestionPreviewServer({
   let server: Server | null = null;
 
   try {
-    const previewRuntime = new ReplaceableQuestionPreviewRuntime(
+    runtime = new ReplaceableQuestionPreviewRuntime(
       await createRuntime(runtimeOptions),
       createRuntime,
       runtimeOptions,
     );
-    runtime = previewRuntime;
+
     await assets.init();
+
     server = createQuestionPreviewApp({
       generatedFilesRoot,
       options,
-      runtime: previewRuntime,
+      runtime,
     }).listen(options.port, options.host);
     await waitForListening(server);
   } catch (err) {
     await runtime?.close().catch(() => {});
+
     const failedServer = server;
+
     if (failedServer != null) {
       await new Promise<void>((resolve) => failedServer.close(() => resolve()));
     }
+
     await removeGeneratedFilesRoot(generatedFilesRoot);
     throw err;
   }
 
-  if (runtime == null || server == null) {
-    await removeGeneratedFilesRoot(generatedFilesRoot);
-    throw new Error('Preview server startup failed before runtime initialization.');
-  }
-
-  const startedRuntime = runtime;
-  const startedServer = server;
-
-  const started: StartedQuestionPreviewServer = {
+  return {
     async close() {
       let closeError: unknown;
+
       try {
         await new Promise<void>((resolve, reject) => {
-          startedServer.close((err) => (err ? reject(err) : resolve()));
+          server.close((err) => (err ? reject(err) : resolve()));
         });
       } catch (err) {
         closeError = err;
       }
 
       try {
-        await startedRuntime.close();
+        await runtime.close();
       } catch (err) {
         closeError ??= err;
       }
 
       await removeGeneratedFilesRoot(generatedFilesRoot);
 
-      if (closeError != null) throw closeError;
+      if (closeError != null) {
+        throw closeError as Error;
+      }
     },
     generatedFilesRoot,
     options,
-    runtime: startedRuntime,
-    server: startedServer,
+    runtime,
+    server,
   };
-  return started;
 }
