@@ -11,19 +11,20 @@ import express, {
   type Response,
 } from 'express';
 import asyncHandler from 'express-async-handler';
+import { z } from 'zod';
 
 import * as assets from './assets.js';
 import {
-  parseQuestionPreviewServerOptions,
-  type QuestionPreviewServerOptions,
-} from './question-preview-server-options.js';
-import {
   type QuestionPreviewPayload,
   type QuestionPreviewRuntime,
+  type QuestionPreviewRuntimeOptions,
   type QuestionPreviewRuntimeRenderInput,
   type QuestionPreviewRuntimeRenderOptions,
-  type QuestionPreviewRuntimeOptions,
 } from './question-preview-render.js';
+import {
+  type QuestionPreviewServerOptions,
+  parseQuestionPreviewServerOptions,
+} from './question-preview-server-options.js';
 
 const GENERATED_FILES_TEMP_PREFIX = 'pl-preview-server-generated-files-';
 const GENERATED_FILES_OWNER_FILE = '.owner.json';
@@ -332,8 +333,8 @@ function isPathInsideRoot(root: string, filePath: string) {
 }
 
 /**
- * Resolves a file below a root while rejecting traversal, missing files,
- * directories, and symlinks along the path.
+ * Resolves a file below a root while rejecting traversal, missing files, and
+ * directories.
  *
  * @param rootInput - Directory that bounds the allowed file lookup.
  * @param pathSegments - Already-decoded path segments relative to `rootInput`.
@@ -342,19 +343,9 @@ async function resolveBoundedFile(rootInput: string, pathSegments: string[]) {
   const root = path.resolve(rootInput);
   const filePath = path.resolve(root, ...pathSegments);
   if (!isPathInsideRoot(root, filePath)) return null;
+  if (!(await fs.stat(root)).isDirectory()) return null;
+  if (!(await fs.stat(filePath)).isFile()) return null;
 
-  let currentPath = root;
-  const rootStat = await fs.lstat(currentPath);
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return null;
-
-  let fileStat = rootStat;
-  for (const segment of pathSegments) {
-    currentPath = path.join(currentPath, segment);
-    fileStat = await fs.lstat(currentPath);
-    if (fileStat.isSymbolicLink()) return null;
-  }
-
-  if (!fileStat.isFile()) return null;
   return filePath;
 }
 
@@ -368,7 +359,7 @@ async function resolveBoundedFileFromRoots(roots: string[], pathSegments: string
   for (const root of roots) {
     try {
       const filePath = await resolveBoundedFile(root, pathSegments);
-      if (filePath != null) return filePath;
+      if (filePath !== null) return filePath;
     } catch (err) {
       if (err instanceof Error && 'code' in err && err.code === 'ENOENT') continue;
       throw err;
@@ -378,17 +369,6 @@ async function resolveBoundedFileFromRoots(roots: string[], pathSegments: string
   return null;
 }
 
-/**
- * Validates the render ID segment used to scope generated preview files.
- *
- * @param renderId - URL path segment expected to contain a UUID render ID.
- */
-function isGeneratedFilesRenderId(renderId: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    renderId,
-  );
-}
-
 interface BoundedAssetRequest {
   roots: string[];
   segments: string[];
@@ -396,6 +376,7 @@ interface BoundedAssetRequest {
 
 const GENERATED_FILES_ROUTE_PREFIX = '/preview-render/generatedFilesQuestion/render/';
 const GENERATED_FILES_ROUTE_PATTERN = `${GENERATED_FILES_ROUTE_PREFIX}*`;
+const GeneratedFilesRenderIdSchema = z.string().uuid();
 
 /**
  * Converts a generated-files URL into a bounded file lookup request.
@@ -411,7 +392,7 @@ function generatedFilesAssetRequestFromPathname(
   if (segments == null || segments.length < 2) return null;
 
   const [renderId, ...fileSegments] = segments;
-  if (!isGeneratedFilesRenderId(renderId)) return null;
+  if (!GeneratedFilesRenderIdSchema.safeParse(renderId).success) return null;
 
   return {
     roots: [path.join(generatedFilesRoot, renderId)],
@@ -537,12 +518,12 @@ async function handleBoundedAssetRequest(res: Response, assetRequest: BoundedAss
   }
 
   await new Promise<void>((resolve, reject) => {
-    res.sendFile(filePath, { headers: { 'cache-control': 'no-store' } }, (err) => {
-      if (err) {
+    res.sendFile(filePath, { headers: { 'cache-control': 'no-store' } }, (err?: Error) => {
+      if (err == null) {
+        resolve();
+      } else {
         reject(err);
-        return;
       }
-      resolve();
     });
   });
 }
@@ -622,15 +603,6 @@ ${payload.bodyHtml}
 }
 
 /**
- * Logs render failure details that are no longer exposed in browser responses.
- *
- * @param details - Renderer failure details for the failed preview.
- */
-function logPreviewRenderFailureDetails(details: unknown) {
-  console.error('Question preview render failed:', details);
-}
-
-/**
  * Checks whether a qid would escape or confuse the course question namespace.
  *
  * @param qid - Decoded question ID from the request path.
@@ -668,23 +640,18 @@ async function handleQuestionPreviewRequest({
   res,
   runtime,
 }: HandleQuestionPreviewRequestParams) {
-  const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
   if (invalidQuestionPreviewQid(qid)) {
     res.status(422).type('html').send(renderPreviewErrorDocument());
     return;
   }
 
-  if (!url.searchParams.has('variant')) {
-    url.searchParams.set('variant', '1');
-    res.redirect(302, `${req.path}${url.search}`);
-    return;
-  }
-
   const renderId = crypto.randomUUID();
+  const url = new URL(req.url, `http://${options.host}:${options.port}`);
+
   const result = await runtime.render(
     {
       qid,
-      variantSeed: url.searchParams.get('variant') ?? '1',
+      variantSeed: url.searchParams.get('variant') ?? undefined,
     },
     {
       generatedFiles: {
@@ -696,11 +663,10 @@ async function handleQuestionPreviewRequest({
 
   if (result.ok) {
     res.status(200).type('html').send(renderPreviewDocument(result.payload));
-    return;
+  } else {
+    console.error('Question preview render failed:', result.diagnostics);
+    res.status(422).type('html').send(renderPreviewErrorDocument());
   }
-
-  logPreviewRenderFailureDetails(result.diagnostics);
-  res.status(422).type('html').send(renderPreviewErrorDocument());
 }
 
 /**
@@ -754,7 +720,8 @@ function createQuestionPreviewApp({
     '/questions/*',
     asyncHandler(async (req, res) => {
       const qid = req.params[0];
-      if (qid == null || qid.length === 0) {
+
+      if (!qid) {
         res.status(404).end();
         return;
       }
