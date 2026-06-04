@@ -4,45 +4,27 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import minimist from 'minimist';
-
 import { discoverInfoDirs } from './discover-info-dirs.js';
 import { APP_ROOT_PATH, REPOSITORY_ROOT_PATH } from './paths.js';
 import {
-  type QuestionPreviewCacheType,
+  parseQuestionPreviewServerOptions,
+  type QuestionPreviewServerOptions,
+} from './question-preview-server-options.js';
+import {
   type QuestionPreviewDiagnostic,
   type QuestionPreviewPayload,
   type QuestionPreviewRuntime,
   type QuestionPreviewRuntimeRenderInput,
   type QuestionPreviewRuntimeRenderOptions,
   type QuestionPreviewRuntimeOptions,
-  type QuestionPreviewWorkersExecutionMode,
   createQuestionPreviewRuntime,
 } from './question-preview-render.js';
 
-const DEFAULT_HOST = '127.0.0.1';
-const DEFAULT_PORT = 4310;
-const DEFAULT_QUESTION_TIMEOUT_MS = 5000;
-const DEFAULT_RENDER_TIMEOUT_MS = 10000;
-const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
-const DEFAULT_CORS_ORIGINS = ['http://127.0.0.1:3000', 'http://localhost:3000'];
 const GENERATED_FILES_TEMP_PREFIX = 'pl-preview-server-generated-files-';
 const GENERATED_FILES_OWNER_FILE = '.owner.json';
 const activeGeneratedFilesRoots = new Set<string>();
 
-export interface QuestionPreviewServerOptions {
-  cacheType: QuestionPreviewCacheType;
-  corsOrigins: string[];
-  courseDir: string;
-  devMode: boolean;
-  host: string;
-  port: number;
-  questionTimeoutMilliseconds: number;
-  renderTimeoutMilliseconds: number;
-  startupTimeoutMilliseconds: number;
-  workersCount: number;
-  workersExecutionMode: QuestionPreviewWorkersExecutionMode;
-}
+export { parseQuestionPreviewServerOptions, type QuestionPreviewServerOptions };
 
 export interface QuestionDiscoveryItem {
   previewUrl: string;
@@ -58,168 +40,6 @@ export interface StartedQuestionPreviewServer {
   options: QuestionPreviewServerOptions;
   runtime: QuestionPreviewRuntime;
   server: http.Server;
-}
-
-function stringArg(argv: Record<string, unknown>, primary: string) {
-  const value = argv[primary];
-  if (typeof value === 'string' && value.length > 0) return value;
-  return undefined;
-}
-
-function stringArrayArg(argv: Record<string, unknown>, primary: string) {
-  const value = argv[primary];
-  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
-  if (typeof value === 'string' && value.length > 0) return [value];
-  return undefined;
-}
-
-function booleanArg(argv: Record<string, unknown>, primary: string, defaultValue = false) {
-  const value = argv[primary];
-  if (typeof value === 'boolean') return value;
-  return defaultValue;
-}
-
-function parsePort(value: string | undefined) {
-  if (value == null) return DEFAULT_PORT;
-  const port = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(port) || port < 0 || port > 65535 || String(port) !== value) {
-    throw new Error(`Invalid --port "${value}". Expected an integer from 0 through 65535.`);
-  }
-  return port;
-}
-
-function parsePositiveInteger(value: string | undefined, flagName: string, defaultValue: number) {
-  if (value == null) return defaultValue;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0 || String(parsed) !== value) {
-    throw new Error(`Invalid --${flagName} "${value}". Expected a positive integer.`);
-  }
-  return parsed;
-}
-
-function parseWorkersExecutionMode(value = 'native'): QuestionPreviewWorkersExecutionMode {
-  const mode = value;
-  if (mode !== 'native' && mode !== 'container') {
-    throw new Error(
-      `Invalid --workers-execution-mode "${mode}". Expected "native" or "container".`,
-    );
-  }
-  return mode;
-}
-
-function parseCacheType(value = 'none'): QuestionPreviewCacheType {
-  const cacheType = value;
-  if (cacheType !== 'none' && cacheType !== 'memory' && cacheType !== 'redis') {
-    throw new Error(`Invalid --cache-type "${cacheType}". Expected "none", "memory", or "redis".`);
-  }
-  return cacheType;
-}
-
-function parseCorsOrigins(values: string[] | undefined) {
-  const rawOrigins = values ?? DEFAULT_CORS_ORIGINS;
-  const origins = rawOrigins.flatMap((value) => value.split(',').map((origin) => origin.trim()));
-  const parsedOrigins = origins
-    .filter((origin) => origin.length > 0)
-    .map((origin) => {
-      try {
-        const url = new URL(origin);
-        if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error();
-        return url.origin;
-      } catch {
-        throw new Error(`Invalid --cors-origin "${origin}". Expected an HTTP(S) origin.`);
-      }
-    });
-
-  return [...new Set(parsedOrigins)];
-}
-
-async function assertValidCourseDir(courseDir: string) {
-  try {
-    const stat = await fs.stat(courseDir);
-    if (!stat.isDirectory()) throw new Error('not a directory');
-    const questionsStat = await fs.stat(path.join(courseDir, 'questions'));
-    if (!questionsStat.isDirectory()) throw new Error('missing questions directory');
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid --course-dir "${courseDir}": ${detail}`, { cause: err });
-  }
-}
-
-export async function parseQuestionPreviewServerOptions(
-  argvInput: string[],
-): Promise<QuestionPreviewServerOptions> {
-  const argv = minimist(argvInput, {
-    boolean: ['dev-mode'],
-    string: [
-      'cache-type',
-      'cors-origin',
-      'course-dir',
-      'host',
-      'port',
-      'question-timeout-ms',
-      'render-timeout-ms',
-      'startup-timeout-ms',
-      'workers-count',
-      'workers-execution-mode',
-    ],
-  });
-
-  if (argv._.length > 0) {
-    throw new Error(`Unexpected positional arguments: ${argv._.join(' ')}`);
-  }
-
-  const supportedFlags = new Set([
-    '_',
-    'cache-type',
-    'cors-origin',
-    'course-dir',
-    'dev-mode',
-    'host',
-    'port',
-    'question-timeout-ms',
-    'render-timeout-ms',
-    'startup-timeout-ms',
-    'workers-count',
-    'workers-execution-mode',
-  ]);
-  const unsupportedFlags = Object.keys(argv).filter((flag) => !supportedFlags.has(flag));
-  if (unsupportedFlags.length > 0) {
-    throw new Error(`Unsupported preview-server flag(s): ${unsupportedFlags.join(', ')}.`);
-  }
-
-  const rawCourseDir = stringArg(argv, 'course-dir');
-  if (!rawCourseDir) {
-    throw new Error('Missing required --course-dir <path> for the local preview server.');
-  }
-
-  const courseDir = path.resolve(rawCourseDir);
-  await assertValidCourseDir(courseDir);
-
-  return {
-    cacheType: parseCacheType(stringArg(argv, 'cache-type')),
-    corsOrigins: parseCorsOrigins(stringArrayArg(argv, 'cors-origin')),
-    courseDir,
-    devMode: booleanArg(argv, 'dev-mode'),
-    host: stringArg(argv, 'host') ?? DEFAULT_HOST,
-    port: parsePort(stringArg(argv, 'port')),
-    questionTimeoutMilliseconds: parsePositiveInteger(
-      stringArg(argv, 'question-timeout-ms'),
-      'question-timeout-ms',
-      DEFAULT_QUESTION_TIMEOUT_MS,
-    ),
-    renderTimeoutMilliseconds: parsePositiveInteger(
-      stringArg(argv, 'render-timeout-ms'),
-      'render-timeout-ms',
-      DEFAULT_RENDER_TIMEOUT_MS,
-    ),
-    startupTimeoutMilliseconds: parsePositiveInteger(
-      stringArg(argv, 'startup-timeout-ms'),
-      'startup-timeout-ms',
-      DEFAULT_STARTUP_TIMEOUT_MS,
-    ),
-    workersCount: parsePositiveInteger(stringArg(argv, 'workers-count'), 'workers-count', 1),
-    workersExecutionMode: parseWorkersExecutionMode(stringArg(argv, 'workers-execution-mode')),
-  };
 }
 
 function listen(server: http.Server, port: number, host: string) {
