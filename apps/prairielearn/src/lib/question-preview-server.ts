@@ -4,7 +4,12 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import express, { type ErrorRequestHandler, type Express, type Response } from 'express';
+import express, {
+  type ErrorRequestHandler,
+  type Express,
+  type Request,
+  type Response,
+} from 'express';
 import asyncHandler from 'express-async-handler';
 
 import * as assets from './assets.js';
@@ -515,15 +520,6 @@ function rawRequestPathname(req: http.IncomingMessage) {
 }
 
 /**
- * Identifies paths that should be treated as assets rather than preview pages.
- *
- * @param pathname - Raw request pathname without query string.
- */
-function isAssetRoutePathname(pathname: string) {
-  return pathname.startsWith('/assets/') || pathname.startsWith('/preview-render/');
-}
-
-/**
  * Extracts a valid HTTP status code from framework errors.
  *
  * @param err - Unknown error thrown while handling a request.
@@ -626,15 +622,16 @@ const STARTUP_COURSE_ASSET_ROUTE_PATTERNS = [
  */
 function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreviewServerOptions) {
   for (const routePattern of STARTUP_COURSE_ASSET_ROUTE_PATTERNS) {
-    app.get(
-      routePattern,
-      asyncHandler(async (req, res) => {
-        await handleStartupCourseAssetRequest({ options, req, res });
-      }),
-    );
-    app.all(routePattern, (_req, res) => {
-      res.status(405).set('cache-control', 'no-store').end();
-    });
+    app
+      .route(routePattern)
+      .get(
+        asyncHandler(async (req, res) => {
+          await handleStartupCourseAssetRequest({ options, req, res });
+        }),
+      )
+      .all((_req, res) => {
+        res.status(405).set('cache-control', 'no-store').end();
+      });
   }
 }
 
@@ -645,15 +642,16 @@ function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreview
  * @param generatedFilesRoot - Temp root containing render-ID directories.
  */
 function registerGeneratedFilesAssetRoutes(app: Express, generatedFilesRoot: string) {
-  app.get(
-    GENERATED_FILES_ROUTE_PATTERN,
-    asyncHandler(async (req, res) => {
-      await handleGeneratedFilesAssetRequest({ generatedFilesRoot, req, res });
-    }),
-  );
-  app.all(GENERATED_FILES_ROUTE_PATTERN, (_req, res) => {
-    res.status(405).set('cache-control', 'no-store').end();
-  });
+  app
+    .route(GENERATED_FILES_ROUTE_PATTERN)
+    .get(
+      asyncHandler(async (req, res) => {
+        await handleGeneratedFilesAssetRequest({ generatedFilesRoot, req, res });
+      }),
+    )
+    .all((_req, res) => {
+      res.status(405).set('cache-control', 'no-store').end();
+    });
 }
 
 /**
@@ -682,21 +680,6 @@ ${payload.bodyHtml}
  */
 function logPreviewRenderFailureDetails(details: unknown) {
   console.error('Question preview render failed:', details);
-}
-
-/**
- * Extracts a question ID from a direct preview pathname.
- *
- * @param pathname - Raw request pathname without query string.
- */
-function qidFromPathname(pathname: string) {
-  const prefix = '/questions/';
-  if (!pathname.startsWith(prefix) || pathname.length === prefix.length) return null;
-  try {
-    return decodeURIComponent(pathname.slice(prefix.length));
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -794,34 +777,23 @@ export async function listQuestionDiscoveryItems(
 }
 
 /**
- * Normalizes a possibly repeated request header to the first header value.
- *
- * @param value - Header value from Node's request header map.
- */
-function requestHeaderValue(value: string | string[] | undefined) {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-/**
- * Adds discovery API CORS headers when the request origin is explicitly allowed.
+ * Adds discovery API CORS headers to the response when the request origin is
+ * explicitly allowed.
  *
  * @param options - Preview-server options containing allowed CORS origins.
  * @param req - Incoming discovery API request.
- * @param headers - Base headers to merge with CORS headers.
+ * @param res - Express response object to mutate.
  */
-function discoveryCorsHeaders(
+function applyDiscoveryCorsHeaders(
   options: QuestionPreviewServerOptions,
-  req: http.IncomingMessage,
-  headers: Record<string, string> = {},
+  req: Request,
+  res: Response,
 ) {
-  const origin = requestHeaderValue(req.headers.origin);
-  if (origin == null || !options.corsOrigins.includes(origin)) return headers;
+  const origin = req.get('origin');
+  if (origin == null || !options.corsOrigins.includes(origin)) return;
 
-  return {
-    ...headers,
-    'access-control-allow-origin': origin,
-    vary: 'Origin',
-  };
+  res.set('access-control-allow-origin', origin);
+  res.vary('Origin');
 }
 
 /**
@@ -834,21 +806,19 @@ function discoveryCorsHeaders(
  */
 function handleQuestionDiscoveryPreflight(params: {
   options: QuestionPreviewServerOptions;
-  req: http.IncomingMessage;
+  req: Request;
   res: Response;
 }) {
   const { options, req, res } = params;
 
-  const requestHeaders = requestHeaderValue(req.headers['access-control-request-headers']);
-  res
-    .status(204)
-    .set(
-      discoveryCorsHeaders(options, req, {
-        'access-control-allow-methods': 'GET, OPTIONS',
-        ...(requestHeaders ? { 'access-control-allow-headers': requestHeaders } : {}),
-      }),
-    )
-    .end();
+  applyDiscoveryCorsHeaders(options, req, res);
+
+  const requestHeaders = req.get('access-control-request-headers');
+  res.status(204).set('access-control-allow-methods', 'GET, OPTIONS');
+  if (requestHeaders != null) {
+    res.set('access-control-allow-headers', requestHeaders);
+  }
+  res.end();
 }
 
 /**
@@ -862,15 +832,15 @@ function handleQuestionDiscoveryPreflight(params: {
  */
 async function handleQuestionDiscoveryGet(params: {
   options: QuestionPreviewServerOptions;
-  req: http.IncomingMessage;
+  req: Request;
   res: Response;
 }) {
   const { options, req, res } = params;
 
+  applyDiscoveryCorsHeaders(options, req, res);
   res
     .status(200)
     .set('cache-control', 'no-store')
-    .set(discoveryCorsHeaders(options, req))
     .json(await listQuestionDiscoveryItems(options.courseDir));
 }
 
@@ -884,16 +854,13 @@ async function handleQuestionDiscoveryGet(params: {
  */
 function handleQuestionDiscoveryMethodNotAllowed(params: {
   options: QuestionPreviewServerOptions;
-  req: http.IncomingMessage;
+  req: Request;
   res: Response;
 }) {
   const { options, req, res } = params;
 
-  res
-    .status(405)
-    .set('cache-control', 'no-store')
-    .set(discoveryCorsHeaders(options, req))
-    .json({ error: 'Method not allowed' });
+  applyDiscoveryCorsHeaders(options, req, res);
+  res.status(405).set('cache-control', 'no-store').json({ error: 'Method not allowed' });
 }
 
 /**
@@ -909,24 +876,14 @@ function handleQuestionDiscoveryMethodNotAllowed(params: {
 async function handleQuestionPreviewRequest(params: {
   generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
-  req: http.IncomingMessage;
+  qid: string;
+  req: Request;
   res: Response;
   runtime: QuestionPreviewRuntime;
 }) {
-  const { generatedFilesRoot, options, req, res, runtime } = params;
+  const { generatedFilesRoot, options, qid, req, res, runtime } = params;
 
   const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
-  const pathname = rawRequestPathname(req);
-  const qid = qidFromPathname(pathname);
-  if (req.method !== 'GET' || qid == null) {
-    res
-      .status(404)
-      .set('cache-control', 'no-store')
-      .type('html')
-      .send('<!doctype html><html><body><h1>Not found</h1></body></html>');
-    return;
-  }
-
   if (invalidQuestionPreviewQid(qid)) {
     res
       .status(422)
@@ -938,7 +895,7 @@ async function handleQuestionPreviewRequest(params: {
 
   if (!url.searchParams.has('variant')) {
     url.searchParams.set('variant', '1');
-    res.set('cache-control', 'no-store').redirect(302, `${pathname}${url.search}`);
+    res.set('cache-control', 'no-store').redirect(302, `${req.path}${url.search}`);
     return;
   }
 
@@ -1019,38 +976,36 @@ function createQuestionPreviewApp(params: {
   app.get(
     '/questions/*',
     asyncHandler(async (req, res) => {
-      await handleQuestionPreviewRequest({ generatedFilesRoot, options, req, res, runtime });
-    }),
-  );
-
-  app.options('/api/questions', (req, res) => {
-    handleQuestionDiscoveryPreflight({ options, req, res });
-  });
-  app.get(
-    '/api/questions',
-    asyncHandler(async (req, res) => {
-      await handleQuestionDiscoveryGet({ options, req, res });
-    }),
-  );
-  app.all('/api/questions', (req, res) => {
-    handleQuestionDiscoveryMethodNotAllowed({ options, req, res });
-  });
-
-  registerStartupCourseAssetRoutes(app, options);
-  registerGeneratedFilesAssetRoutes(app, generatedFilesRoot);
-
-  app.use(
-    asyncHandler(async (req, res) => {
-      const rawPathname = rawRequestPathname(req);
-
-      if (isAssetRoutePathname(rawPathname)) {
+      const qid = req.params[0];
+      if (qid == null || qid.length === 0) {
         res.status(404).set('cache-control', 'no-store').end();
         return;
       }
 
-      await handleQuestionPreviewRequest({ generatedFilesRoot, options, req, res, runtime });
+      await handleQuestionPreviewRequest({ generatedFilesRoot, options, qid, req, res, runtime });
     }),
   );
+
+  app
+    .route('/api/questions')
+    .options((req, res) => {
+      handleQuestionDiscoveryPreflight({ options, req, res });
+    })
+    .get(
+      asyncHandler(async (req, res) => {
+        await handleQuestionDiscoveryGet({ options, req, res });
+      }),
+    )
+    .all((req, res) => {
+      handleQuestionDiscoveryMethodNotAllowed({ options, req, res });
+    });
+
+  registerStartupCourseAssetRoutes(app, options);
+  registerGeneratedFilesAssetRoutes(app, generatedFilesRoot);
+
+  app.use((_req, res) => {
+    res.status(404).set('cache-control', 'no-store').end();
+  });
 
   app.use(questionPreviewErrorHandler());
 
