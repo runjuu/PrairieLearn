@@ -700,7 +700,7 @@ function discoveryCorsHeaders(
   };
 }
 
-async function handleQuestionDiscoveryRequest({
+function handleQuestionDiscoveryPreflight({
   options,
   req,
   res,
@@ -709,30 +709,44 @@ async function handleQuestionDiscoveryRequest({
   req: http.IncomingMessage;
   res: http.ServerResponse;
 }) {
-  if (req.method === 'OPTIONS') {
-    const requestHeaders = requestHeaderValue(req.headers['access-control-request-headers']);
-    res.writeHead(
-      204,
-      discoveryCorsHeaders(options, req, {
-        'access-control-allow-methods': 'GET, OPTIONS',
-        ...(requestHeaders ? { 'access-control-allow-headers': requestHeaders } : {}),
-      }),
-    );
-    res.end();
-    return;
-  }
+  const requestHeaders = requestHeaderValue(req.headers['access-control-request-headers']);
+  res.writeHead(
+    204,
+    discoveryCorsHeaders(options, req, {
+      'access-control-allow-methods': 'GET, OPTIONS',
+      ...(requestHeaders ? { 'access-control-allow-headers': requestHeaders } : {}),
+    }),
+  );
+  res.end();
+}
 
-  if (req.method !== 'GET') {
-    sendJson(res, 405, { error: 'Method not allowed' }, discoveryCorsHeaders(options, req));
-    return;
-  }
-
+async function handleQuestionDiscoveryGet({
+  options,
+  req,
+  res,
+}: {
+  options: QuestionPreviewServerOptions;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+}) {
   sendJson(
     res,
     200,
     await listQuestionDiscoveryItems(options.courseDir),
     discoveryCorsHeaders(options, req),
   );
+}
+
+function handleQuestionDiscoveryMethodNotAllowed({
+  options,
+  req,
+  res,
+}: {
+  options: QuestionPreviewServerOptions;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+}) {
+  sendJson(res, 405, { error: 'Method not allowed' }, discoveryCorsHeaders(options, req));
 }
 
 async function handleQuestionPreviewRequest({
@@ -831,6 +845,7 @@ function createQuestionPreviewApp({
 }) {
   const app = express();
   app.disable('x-powered-by');
+  app.enable('strict routing');
 
   app.get(
     '/questions/*',
@@ -839,15 +854,22 @@ function createQuestionPreviewApp({
     }),
   );
 
+  app.options('/api/questions', (req, res) => {
+    handleQuestionDiscoveryPreflight({ options, req, res });
+  });
+  app.get(
+    '/api/questions',
+    asyncHandler(async (req, res) => {
+      await handleQuestionDiscoveryGet({ options, req, res });
+    }),
+  );
+  app.all('/api/questions', (req, res) => {
+    handleQuestionDiscoveryMethodNotAllowed({ options, req, res });
+  });
+
   app.use(
     asyncHandler(async (req, res) => {
-      const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
       const rawPathname = rawRequestPathname(req);
-
-      if (url.pathname === '/api/questions') {
-        await handleQuestionDiscoveryRequest({ options, req, res });
-        return;
-      }
 
       if (isAssetRoutePathname(rawPathname)) {
         await handleAssetRequest({ generatedFilesRoot, options, req, res });
