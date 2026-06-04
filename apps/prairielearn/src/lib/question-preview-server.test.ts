@@ -524,6 +524,37 @@ describe('question preview server discovery API', () => {
     }
   });
 
+  it('does not expose discovery responses on adjacent API paths', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'exact/discovery-route', {
+      title: 'Exact discovery route',
+      topic: 'Rendering',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111138',
+    });
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => ({ diagnostics: [], ok: false }),
+      }),
+    });
+
+    try {
+      const response = await fetch(`${serverUrl(started)}/api/questions/`, {
+        headers: { origin: 'http://localhost:3000' },
+      });
+      const body = await response.text();
+
+      assert.equal(response.status, 404);
+      assert.equal(response.headers.get('access-control-allow-origin'), null);
+      nodeAssert.doesNotMatch(body, /Exact discovery route|exact\/discovery-route/);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('allows only default local Next.js origins for discovery CORS', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestionInfo(courseDir, 'cors/question', {
