@@ -4,6 +4,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
+import express, { type ErrorRequestHandler } from 'express';
+import asyncHandler from 'express-async-handler';
+
 import { discoverInfoDirs } from './discover-info-dirs.js';
 import { APP_ROOT_PATH, REPOSITORY_ROOT_PATH } from './paths.js';
 import {
@@ -600,6 +603,29 @@ function qidFromPathname(pathname: string) {
   }
 }
 
+function invalidQuestionPreviewQidDiagnostic(qid: string): QuestionPreviewDiagnostic | null {
+  const segments = qid.split('/');
+
+  if (
+    qid.length === 0 ||
+    qid.startsWith('/') ||
+    qid.includes('\\') ||
+    qid.includes('\0') ||
+    path.isAbsolute(qid) ||
+    segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+  ) {
+    return {
+      data: { qid },
+      fatal: true,
+      message: 'Invalid question id. Expected a relative qid below the course questions directory.',
+      name: 'ExpectedQuestionPreviewError',
+      phase: 'input',
+    };
+  }
+
+  return null;
+}
+
 function previewUrlForQid(qid: string) {
   return `/questions/${qid.split('/').map(encodeURIComponent).join('/')}?variant=1`;
 }
@@ -730,6 +756,16 @@ async function handleQuestionPreviewRequest({
     return;
   }
 
+  const qidDiagnostic = invalidQuestionPreviewQidDiagnostic(qid);
+  if (qidDiagnostic != null) {
+    sendHtml(
+      res,
+      422,
+      renderDiagnosticDocument([qidDiagnostic], { sanitizePaths: [options.courseDir] }),
+    );
+    return;
+  }
+
   if (!url.searchParams.has('variant')) {
     url.searchParams.set('variant', '1');
     res.writeHead(302, { location: `${pathname}${url.search}` });
@@ -763,6 +799,70 @@ async function handleQuestionPreviewRequest({
   );
 }
 
+function questionPreviewErrorHandler(options: QuestionPreviewServerOptions): ErrorRequestHandler {
+  return (err, _req, res, next) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+
+    const diagnostic: QuestionPreviewDiagnostic = {
+      fatal: true,
+      message: err instanceof Error ? err.message : String(err),
+      name: err instanceof Error ? err.name : 'Error',
+      phase: 'render',
+    };
+    sendHtml(
+      res,
+      500,
+      renderDiagnosticDocument([diagnostic], { sanitizePaths: [options.courseDir] }),
+    );
+  };
+}
+
+function createQuestionPreviewApp({
+  generatedFilesRoot,
+  options,
+  runtime,
+}: {
+  generatedFilesRoot: string;
+  options: QuestionPreviewServerOptions;
+  runtime: QuestionPreviewRuntime;
+}) {
+  const app = express();
+  app.disable('x-powered-by');
+
+  app.get(
+    '/questions/*',
+    asyncHandler(async (req, res) => {
+      await handleQuestionPreviewRequest({ generatedFilesRoot, options, req, res, runtime });
+    }),
+  );
+
+  app.use(
+    asyncHandler(async (req, res) => {
+      const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
+      const rawPathname = rawRequestPathname(req);
+
+      if (url.pathname === '/api/questions') {
+        await handleQuestionDiscoveryRequest({ options, req, res });
+        return;
+      }
+
+      if (isAssetRoutePathname(rawPathname)) {
+        await handleAssetRequest({ generatedFilesRoot, options, req, res });
+        return;
+      }
+
+      await handleQuestionPreviewRequest({ generatedFilesRoot, options, req, res, runtime });
+    }),
+  );
+
+  app.use(questionPreviewErrorHandler(options));
+
+  return app;
+}
+
 export async function startQuestionPreviewServer({
   argv = process.argv.slice(2),
   createRuntime = createQuestionPreviewRuntime,
@@ -785,36 +885,13 @@ export async function startQuestionPreviewServer({
       runtimeOptions,
     );
     runtime = previewRuntime;
-    server = http.createServer((req, res) => {
-      const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
-      const rawPathname = rawRequestPathname(req);
-      const requestPromise =
-        url.pathname === '/api/questions'
-          ? handleQuestionDiscoveryRequest({ options, req, res })
-          : isAssetRoutePathname(rawPathname)
-            ? handleAssetRequest({ generatedFilesRoot, options, req, res })
-            : handleQuestionPreviewRequest({
-                generatedFilesRoot,
-                options,
-                req,
-                res,
-                runtime: previewRuntime,
-              });
-
-      requestPromise.catch((err) => {
-        const diagnostic: QuestionPreviewDiagnostic = {
-          fatal: true,
-          message: err instanceof Error ? err.message : String(err),
-          name: err instanceof Error ? err.name : 'Error',
-          phase: 'render',
-        };
-        sendHtml(
-          res,
-          500,
-          renderDiagnosticDocument([diagnostic], { sanitizePaths: [options.courseDir] }),
-        );
-      });
-    });
+    server = http.createServer(
+      createQuestionPreviewApp({
+        generatedFilesRoot,
+        options,
+        runtime: previewRuntime,
+      }),
+    );
 
     await listen(server, options.port, options.host);
   } catch (err) {
