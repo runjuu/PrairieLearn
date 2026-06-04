@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import * as cheerio from 'cheerio';
+import { isTag } from 'domhandler';
+
 import { cache } from '@prairielearn/cache';
 import { html, unsafeHtml } from '@prairielearn/html';
 import { generateSignedToken } from '@prairielearn/signed-token';
-import * as cheerio from 'cheerio';
-import { isTag } from 'domhandler';
 
 import { HeadContents } from '../components/HeadContents.js';
 import { QuestionHeadContents } from '../components/QuestionHeadContents.js';
@@ -454,14 +455,14 @@ function makeQuestionPreviewFailureEnvelope(
   };
 }
 
-function isPathInsideRoot(root: string, filePath: string) {
+export function isPathInsideRoot(root: string, filePath: string) {
   const relativePath = path.relative(root, filePath);
   return (
     relativePath.length === 0 || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
   );
 }
 
-function decodeGeneratedFilePathSegments(encodedPath: string) {
+export function decodeSafeUrlPathSegments(encodedPath: string) {
   if (encodedPath.length === 0) return null;
 
   const decodedSegments: string[] = [];
@@ -510,9 +511,7 @@ function extractGeneratedFilePathSegments(htmlContent: string, generatedFilesUrl
 
       if (!pathname.startsWith(generatedFilesPathPrefix)) continue;
 
-      const segments = decodeGeneratedFilePathSegments(
-        pathname.slice(generatedFilesPathPrefix.length),
-      );
+      const segments = decodeSafeUrlPathSegments(pathname.slice(generatedFilesPathPrefix.length));
       if (segments == null) continue;
 
       pathsByName.set(segments.join('/'), segments);
