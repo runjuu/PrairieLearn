@@ -7,8 +7,8 @@ import path from 'node:path';
 import express, { type ErrorRequestHandler } from 'express';
 import asyncHandler from 'express-async-handler';
 
+import * as assets from './assets.js';
 import { discoverInfoDirs } from './discover-info-dirs.js';
-import { APP_ROOT_PATH, REPOSITORY_ROOT_PATH } from './paths.js';
 import {
   parseQuestionPreviewServerOptions,
   type QuestionPreviewServerOptions,
@@ -361,29 +361,7 @@ function assetRequestFromPathname(courseDir: string, generatedFilesRoot: string,
     };
   }
 
-  const appNodeModules = path.join(APP_ROOT_PATH, 'node_modules');
-  const repoNodeModules = path.join(REPOSITORY_ROOT_PATH, 'node_modules');
   const staticAssetRoutes = [
-    {
-      prefix: '/assets/build/',
-      roots: [path.join(APP_ROOT_PATH, 'public', 'build')],
-      stripCachebuster: false,
-    },
-    {
-      prefix: '/assets/public/',
-      roots: [path.join(APP_ROOT_PATH, 'public')],
-      stripCachebuster: true,
-    },
-    {
-      prefix: '/assets/node_modules/',
-      roots: [appNodeModules, repoNodeModules],
-      stripCachebuster: true,
-    },
-    {
-      prefix: '/assets/elements/',
-      roots: [path.join(APP_ROOT_PATH, 'elements')],
-      stripCachebuster: true,
-    },
     {
       prefix: '/preview-render/clientFilesCourse/',
       roots: [path.join(courseDir, 'clientFilesCourse')],
@@ -454,6 +432,14 @@ function rawRequestPathname(req: http.IncomingMessage) {
 
 function isAssetRoutePathname(pathname: string) {
   return pathname.startsWith('/assets/') || pathname.startsWith('/preview-render/');
+}
+
+function errorStatusCode(err: unknown) {
+  if (typeof err !== 'object' || err == null || Array.isArray(err)) return null;
+  const status = (err as Record<string, unknown>).status;
+  return Number.isInteger(status) && (status as number) >= 400 && (status as number) < 600
+    ? (status as number)
+    : null;
 }
 
 async function handleAssetRequest({
@@ -820,6 +806,12 @@ function questionPreviewErrorHandler(options: QuestionPreviewServerOptions): Err
       return;
     }
 
+    const status = errorStatusCode(err);
+    if (status != null && status < 500) {
+      sendEmpty(res, status);
+      return;
+    }
+
     const diagnostic: QuestionPreviewDiagnostic = {
       fatal: true,
       message: err instanceof Error ? err.message : String(err),
@@ -846,6 +838,8 @@ function createQuestionPreviewApp({
   const app = express();
   app.disable('x-powered-by');
   app.enable('strict routing');
+
+  assets.applyMiddleware(app);
 
   app.get(
     '/questions/*',
@@ -907,6 +901,7 @@ export async function startQuestionPreviewServer({
       runtimeOptions,
     );
     runtime = previewRuntime;
+    await assets.init();
     server = http.createServer(
       createQuestionPreviewApp({
         generatedFilesRoot,
