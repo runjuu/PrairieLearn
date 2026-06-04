@@ -4,6 +4,8 @@ import path from 'node:path';
 import { cache } from '@prairielearn/cache';
 import { html, unsafeHtml } from '@prairielearn/html';
 import { generateSignedToken } from '@prairielearn/signed-token';
+import * as cheerio from 'cheerio';
+import { isTag } from 'domhandler';
 
 import { HeadContents } from '../components/HeadContents.js';
 import { QuestionHeadContents } from '../components/QuestionHeadContents.js';
@@ -47,17 +49,30 @@ export interface QuestionPreviewRuntimeRenderInput {
   variantSeed?: string;
 }
 
+export interface QuestionPreviewGeneratedFilesOptions {
+  renderId: string;
+  root: string;
+}
+
+export interface QuestionPreviewRuntimeRenderOptions {
+  generatedFiles?: QuestionPreviewGeneratedFilesOptions;
+}
+
 export interface QuestionPreviewInput
   extends QuestionPreviewRuntimeOptions, QuestionPreviewRuntimeRenderInput {}
 
 interface QuestionPreviewInternalRenderInput extends QuestionPreviewRuntimeRenderInput {
   courseDir: string;
+  generatedFiles?: QuestionPreviewGeneratedFilesOptions;
   urlPrefix: string;
 }
 
 export interface QuestionPreviewRuntime {
   close(): Promise<void>;
-  render(input: QuestionPreviewRuntimeRenderInput): Promise<QuestionPreviewResult>;
+  render(
+    input: QuestionPreviewRuntimeRenderInput,
+    options?: QuestionPreviewRuntimeRenderOptions,
+  ): Promise<QuestionPreviewResult>;
 }
 
 export interface QuestionPreviewDiagnostic {
@@ -264,15 +279,23 @@ function assetUrlPath(pathSegments: string[]) {
   return pathSegments.map(encodeURIComponent).join('/');
 }
 
+export function makePreviewGeneratedFilesUrl(urlPrefix: string, renderId: string) {
+  return `${urlPrefix}/generatedFilesQuestion/render/${encodeURIComponent(renderId)}`;
+}
+
 export function makePreviewLocals(
   urlPrefix: string,
   qid: string,
+  renderId?: string,
 ): questionServers.QuestionRenderRequiredLocals {
   return {
     allowAnswerEditing: true,
     baseUrl: urlPrefix,
     clientFilesCourseUrl: `${urlPrefix}/clientFilesCourse`,
-    clientFilesQuestionGeneratedFileUrl: `${urlPrefix}/generatedFilesQuestion/variant/${PREVIEW_VARIANT_ID}`,
+    clientFilesQuestionGeneratedFileUrl:
+      renderId == null
+        ? `${urlPrefix}/generatedFilesQuestion/variant/${PREVIEW_VARIANT_ID}`
+        : makePreviewGeneratedFilesUrl(urlPrefix, renderId),
     clientFilesQuestionUrl: `${urlPrefix}/questions/${assetUrlPath(qid.split('/'))}/files`,
     externalImageCaptureUrl: null,
     questionUrl: `${urlPrefix}/question/${PREVIEW_QUESTION_ID}/`,
@@ -431,6 +454,147 @@ function makeQuestionPreviewFailureEnvelope(
   };
 }
 
+function isPathInsideRoot(root: string, filePath: string) {
+  const relativePath = path.relative(root, filePath);
+  return (
+    relativePath.length === 0 || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+  );
+}
+
+function decodeGeneratedFilePathSegments(encodedPath: string) {
+  if (encodedPath.length === 0) return null;
+
+  const decodedSegments: string[] = [];
+  for (const segment of encodedPath.split('/')) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+
+    if (
+      decoded.length === 0 ||
+      decoded === '.' ||
+      decoded === '..' ||
+      decoded.includes('\0') ||
+      decoded.includes('/') ||
+      decoded.includes('\\') ||
+      path.isAbsolute(decoded)
+    ) {
+      return null;
+    }
+
+    decodedSegments.push(decoded);
+  }
+
+  return decodedSegments;
+}
+
+function extractGeneratedFilePathSegments(htmlContent: string, generatedFilesUrl: string) {
+  const $ = cheerio.load(htmlContent);
+  const generatedFilesPathname = new URL(generatedFilesUrl, 'http://preview.local').pathname;
+  const generatedFilesPathPrefix = `${generatedFilesPathname}/`;
+  const pathsByName = new Map<string, string[]>();
+
+  $('*').each((_, element) => {
+    if (!isTag(element)) return;
+
+    for (const value of Object.values(element.attribs)) {
+      let pathname: string;
+      try {
+        pathname = new URL(value, 'http://preview.local').pathname;
+      } catch {
+        continue;
+      }
+
+      if (!pathname.startsWith(generatedFilesPathPrefix)) continue;
+
+      const segments = decodeGeneratedFilePathSegments(
+        pathname.slice(generatedFilesPathPrefix.length),
+      );
+      if (segments == null) continue;
+
+      pathsByName.set(segments.join('/'), segments);
+    }
+  });
+
+  return [...pathsByName.values()];
+}
+
+async function writeGeneratedPreviewFiles({
+  caller,
+  course,
+  generatedFiles,
+  generatedFilesUrl,
+  htmlContent,
+  question,
+  questionServer,
+  sanitizePaths,
+  variant,
+}: {
+  caller: QuestionCaller;
+  course: Course;
+  generatedFiles: QuestionPreviewGeneratedFilesOptions;
+  generatedFilesUrl: string;
+  htmlContent: string;
+  question: Question;
+  questionServer: questionServers.QuestionServer;
+  sanitizePaths: string[];
+  variant: Variant;
+}) {
+  const generatedFilePaths = extractGeneratedFilePathSegments(htmlContent, generatedFilesUrl);
+  if (generatedFilePaths.length === 0) return [];
+
+  if (questionServer.file == null) {
+    return [
+      {
+        fatal: true,
+        message:
+          'Question preview generated-file URL found, but the question type has no file() handler.',
+        name: 'Error',
+        phase: 'render' as const,
+      },
+    ];
+  }
+
+  const renderRoot = path.resolve(generatedFiles.root, generatedFiles.renderId);
+  const diagnostics: QuestionPreviewDiagnostic[] = [];
+
+  for (const fileSegments of generatedFilePaths) {
+    const outputPath = path.resolve(renderRoot, ...fileSegments);
+    if (!isPathInsideRoot(renderRoot, outputPath)) {
+      diagnostics.push({
+        data: { filename: fileSegments.join('/') },
+        fatal: true,
+        message: 'Generated file path resolves outside the render-scoped generated-file directory.',
+        name: 'Error',
+        phase: 'render',
+      });
+      continue;
+    }
+
+    const fileResult = await questionServer.file(
+      fileSegments.join('/'),
+      variant,
+      question,
+      course,
+      caller,
+    );
+    const fileDiagnostics = diagnosticsFromIssues(fileResult.courseIssues, 'render', {
+      sanitizePaths,
+    });
+    diagnostics.push(...fileDiagnostics);
+
+    if (fileResult.courseIssues.some((issue) => issue.fatal)) continue;
+
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.writeFile(outputPath, fileResult.data);
+  }
+
+  return diagnostics;
+}
+
 function validateQuestionPreviewQid(qid: string) {
   const segments = qid.split('/');
 
@@ -547,6 +711,7 @@ async function closePrairieLearnForQuestionPreview() {
 
 async function renderQuestionPreviewInRuntime({
   courseDir,
+  generatedFiles,
   qid,
   urlPrefix,
   variantSeed = '1',
@@ -620,9 +785,13 @@ async function renderQuestionPreviewInRuntime({
     });
 
     phase = 'render';
+    const generatedFilesUrl =
+      generatedFiles == null
+        ? null
+        : makePreviewGeneratedFilesUrl(urlPrefix, generatedFiles.renderId);
     const renderResult = await questionServer.render({
       course,
-      locals: makePreviewLocals(urlPrefix, qid),
+      locals: makePreviewLocals(urlPrefix, qid, generatedFiles?.renderId),
       question,
       renderSelection: { question: true },
       submission: null,
@@ -638,6 +807,30 @@ async function renderQuestionPreviewInRuntime({
         ...generateDiagnostics,
         ...prepareDiagnostics,
         ...renderDiagnostics,
+      ]);
+    }
+    const generatedFileDiagnostics =
+      generatedFiles == null || generatedFilesUrl == null
+        ? []
+        : await writeGeneratedPreviewFiles({
+            caller,
+            course,
+            generatedFiles,
+            generatedFilesUrl,
+            htmlContent: [renderResult.data.extraHeadersHtml, renderResult.data.questionHtml].join(
+              '\n',
+            ),
+            question,
+            questionServer,
+            sanitizePaths,
+            variant: preparedVariant,
+          });
+    if (generatedFileDiagnostics.some((diagnostic) => diagnostic.fatal)) {
+      return makeQuestionPreviewFailureEnvelope([
+        ...generateDiagnostics,
+        ...prepareDiagnostics,
+        ...renderDiagnostics,
+        ...generatedFileDiagnostics,
       ]);
     }
 
@@ -659,7 +852,12 @@ async function renderQuestionPreviewInRuntime({
 
     return makeQuestionPreviewSuccessEnvelope({
       bodyHtml,
-      diagnostics: [...generateDiagnostics, ...prepareDiagnostics, ...renderDiagnostics],
+      diagnostics: [
+        ...generateDiagnostics,
+        ...prepareDiagnostics,
+        ...renderDiagnostics,
+        ...generatedFileDiagnostics,
+      ],
       headHtml: shellHeadHtml,
       variantSeed: preparedVariant.variant_seed,
     });
@@ -677,7 +875,10 @@ class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
     private readonly urlPrefix: string,
   ) {}
 
-  async render(input: QuestionPreviewRuntimeRenderInput): Promise<QuestionPreviewResult> {
+  async render(
+    input: QuestionPreviewRuntimeRenderInput,
+    options?: QuestionPreviewRuntimeRenderOptions,
+  ): Promise<QuestionPreviewResult> {
     if (this.closed) {
       throw new Error('Question preview runtime is already closed.');
     }
@@ -707,6 +908,7 @@ class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
     return renderQuestionPreviewInRuntime({
       ...input,
       courseDir: this.courseDir,
+      generatedFiles: options?.generatedFiles,
       urlPrefix: this.urlPrefix,
     });
   }
