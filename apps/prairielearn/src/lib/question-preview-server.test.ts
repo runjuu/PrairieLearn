@@ -105,6 +105,153 @@ async function requestRawPath(
 }
 
 describe('question preview server startup', () => {
+  it('rejects a value-required startup flag when its value is omitted', async () => {
+    const courseDir = await makeTempCourse();
+
+    try {
+      await nodeAssert.rejects(
+        () => parseQuestionPreviewServerOptions(['--course-dir', courseDir, '--port']),
+        /Invalid --port/,
+      );
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('preserves supported startup option defaults and explicit flag parsing', async () => {
+    const courseDir = await makeTempCourse();
+
+    try {
+      const defaultOptions = await parseQuestionPreviewServerOptions(['--course-dir', courseDir]);
+      assert.deepEqual(defaultOptions, {
+        cacheType: 'none',
+        corsOrigins: ['http://127.0.0.1:3000', 'http://localhost:3000'],
+        courseDir: path.resolve(courseDir),
+        devMode: false,
+        host: '127.0.0.1',
+        port: 4310,
+        questionTimeoutMilliseconds: 5000,
+        renderTimeoutMilliseconds: 10000,
+        startupTimeoutMilliseconds: 30000,
+        workersCount: 1,
+        workersExecutionMode: 'native',
+      });
+
+      const explicitOptions = await parseQuestionPreviewServerOptions([
+        '--course-dir',
+        courseDir,
+        '--cache-type',
+        'memory',
+        '--cors-origin',
+        ' http://127.0.0.1:5173/demo , https://example.test ',
+        '--cors-origin',
+        'http://127.0.0.1:5173',
+        '--dev-mode',
+        '--host',
+        '0.0.0.0',
+        '--port',
+        '0',
+        '--question-timeout-ms',
+        '1',
+        '--render-timeout-ms',
+        '2',
+        '--startup-timeout-ms',
+        '3',
+        '--workers-count',
+        '4',
+        '--workers-execution-mode',
+        'container',
+      ]);
+
+      assert.deepEqual(explicitOptions, {
+        cacheType: 'memory',
+        corsOrigins: ['http://127.0.0.1:5173', 'https://example.test'],
+        courseDir: path.resolve(courseDir),
+        devMode: true,
+        host: '0.0.0.0',
+        port: 0,
+        questionTimeoutMilliseconds: 1,
+        renderTimeoutMilliseconds: 2,
+        startupTimeoutMilliseconds: 3,
+        workersCount: 4,
+        workersExecutionMode: 'container',
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects unsupported and invalid startup options before creating the runtime', async () => {
+    const courseDir = await makeTempCourse();
+    const missingCourseDir = path.join(os.tmpdir(), 'pl-preview-server-missing-course');
+    let runtimeCreations = 0;
+
+    const invalidCases: { argv: string[]; message: RegExp }[] = [
+      {
+        argv: ['--course-dir', courseDir, '--unsupported-flag'],
+        message: /Unsupported preview-server flag/,
+      },
+      {
+        argv: ['--course-dir', courseDir, 'unexpected'],
+        message: /Unexpected positional arguments/,
+      },
+      { argv: ['--course-dir', courseDir, '--port', '65536'], message: /Invalid --port/ },
+      {
+        argv: ['--course-dir', courseDir, '--question-timeout-ms', '0'],
+        message: /Invalid --question-timeout-ms/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--render-timeout-ms', '1.5'],
+        message: /Invalid --render-timeout-ms/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--startup-timeout-ms', 'abc'],
+        message: /Invalid --startup-timeout-ms/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--workers-count', '0'],
+        message: /Invalid --workers-count/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--cache-type', 'disk'],
+        message: /Invalid --cache-type/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--workers-execution-mode', 'disabled'],
+        message: /Invalid --workers-execution-mode/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--cors-origin', 'ftp://example.test'],
+        message: /Invalid --cors-origin/,
+      },
+      { argv: ['--course-dir', missingCourseDir], message: /Invalid --course-dir/ },
+    ];
+
+    try {
+      for (const testCase of invalidCases) {
+        await nodeAssert.rejects(
+          () =>
+            startQuestionPreviewServer({
+              argv: testCase.argv,
+              createRuntime: async () => {
+                runtimeCreations++;
+                return {
+                  close: async () => {},
+                  render: async () => ({ diagnostics: [], ok: false }),
+                };
+              },
+            }),
+          testCase.message,
+          testCase.argv.join(' '),
+        );
+      }
+
+      assert.equal(runtimeCreations, 0);
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('requires an explicit valid course directory and prewarms before readiness', async () => {
     const courseDir = await makeTempCourse();
     const missingCourseDir = path.join(os.tmpdir(), 'pl-preview-server-missing-course');
