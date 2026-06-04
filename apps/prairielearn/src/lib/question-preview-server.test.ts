@@ -972,6 +972,9 @@ describe('question preview server asset routes', () => {
       assert.equal(firstFile.status, 200);
       assert.equal(await firstFile.text(), 'generated file for seed 1');
 
+      const postFile = await fetch(`${baseUrl}${firstPath}`, { method: 'POST' });
+      assert.equal(postFile.status, 405);
+
       const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
       const secondHtml = await second.text();
       const secondMatch = secondHtml.match(
@@ -999,6 +1002,7 @@ describe('question preview server asset routes', () => {
 
   it('rejects generated-file render ID mixing and invalid generated-file paths', async () => {
     const courseDir = await makeTempCourse();
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-server-outside-'));
     const qid = 'runtime/generated-file-isolation';
     await writeQuestionInfo(courseDir, qid, {
       title: 'Generated file isolation',
@@ -1043,6 +1047,11 @@ describe('question preview server asset routes', () => {
       assert.equal(first.status, 200);
       assert.isNotNull(firstMatch);
       const firstRenderId = firstMatch?.groups?.renderId ?? '';
+      await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'outside generated secret');
+      await fs.symlink(
+        path.join(outsideDir, 'secret.txt'),
+        path.join(started.generatedFilesRoot, firstRenderId, 'linked-secret.txt'),
+      );
 
       const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
       const secondHtml = await second.text();
@@ -1067,17 +1076,23 @@ describe('question preview server asset routes', () => {
         `/preview-render/generatedFilesQuestion/render/${firstRenderId}/%2Ftmp%2Fsecret.txt`,
         `/preview-render/generatedFilesQuestion/render/${firstRenderId}/dir%5Csecret.txt`,
         `/preview-render/generatedFilesQuestion/render/${firstRenderId}//first.txt`,
+        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/linked-secret.txt`,
       ];
 
       for (const rejectedPath of rejectedPaths) {
         const response = await requestRawPath(started, rejectedPath);
 
         assert.notEqual(response.status, 200, rejectedPath);
-        nodeAssert.doesNotMatch(response.body, /generated first|generated second/, rejectedPath);
+        nodeAssert.doesNotMatch(
+          response.body,
+          /generated first|generated second|outside generated secret/,
+          rejectedPath,
+        );
       }
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
+      await fs.rm(outsideDir, { force: true, recursive: true });
     }
   });
 });
