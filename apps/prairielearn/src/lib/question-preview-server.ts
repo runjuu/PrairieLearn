@@ -197,6 +197,65 @@ function makeRuntimeOptions(options: QuestionPreviewServerOptions): QuestionPrev
   };
 }
 
+class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
+  private currentRuntime: QuestionPreviewRuntime | null;
+  private nextRuntimePromise: Promise<QuestionPreviewRuntime> | null = null;
+
+  constructor(
+    initialRuntime: QuestionPreviewRuntime,
+    private readonly createRuntime: (
+      options: QuestionPreviewRuntimeOptions,
+    ) => Promise<QuestionPreviewRuntime>,
+    private readonly runtimeOptions: QuestionPreviewRuntimeOptions,
+  ) {
+    this.currentRuntime = initialRuntime;
+  }
+
+  private async getRuntime() {
+    if (this.currentRuntime != null) return this.currentRuntime;
+
+    this.nextRuntimePromise ??= this.createRuntime(this.runtimeOptions).finally(() => {
+      this.nextRuntimePromise = null;
+    });
+    this.currentRuntime = await this.nextRuntimePromise;
+    return this.currentRuntime;
+  }
+
+  private async discardRuntime(runtime: QuestionPreviewRuntime) {
+    if (this.currentRuntime !== runtime) return;
+    this.currentRuntime = null;
+
+    try {
+      await runtime.close();
+    } catch {
+      // The runtime has already failed. A close failure should not prevent
+      // the request from reporting the original infrastructure failure.
+    }
+  }
+
+  async render(input: Parameters<QuestionPreviewRuntime['render']>[0]) {
+    const runtime = await this.getRuntime();
+
+    try {
+      return await runtime.render(input);
+    } catch (err) {
+      await this.discardRuntime(runtime);
+      throw err;
+    }
+  }
+
+  async close() {
+    const pendingRuntime = this.nextRuntimePromise;
+    if (pendingRuntime != null) {
+      await pendingRuntime.catch(() => null);
+    }
+
+    const runtime = this.currentRuntime;
+    this.currentRuntime = null;
+    await runtime?.close();
+  }
+}
+
 function escapeHtml(value: string) {
   return value
     .replaceAll('&', '&amp;')
@@ -310,7 +369,12 @@ export async function startQuestionPreviewServer({
   onReady?: (started: StartedQuestionPreviewServer) => void;
 } = {}): Promise<StartedQuestionPreviewServer> {
   const options = await parseQuestionPreviewServerOptions(argv);
-  const runtime = await createRuntime(makeRuntimeOptions(options));
+  const runtimeOptions = makeRuntimeOptions(options);
+  const runtime = new ReplaceableQuestionPreviewRuntime(
+    await createRuntime(runtimeOptions),
+    createRuntime,
+    runtimeOptions,
+  );
   const server = http.createServer((req, res) => {
     handleQuestionPreviewRequest({ options, req, res, runtime }).catch((err) => {
       const diagnostic: QuestionPreviewDiagnostic = {
