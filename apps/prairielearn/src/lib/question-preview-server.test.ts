@@ -224,6 +224,125 @@ describe('question preview server direct preview route', () => {
     }
   });
 
+  it('keeps the warm runtime after expected direct preview failures', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: Array<{ qid: string; runtimeId: number; variantSeed?: string }> = [];
+    let runtimeCount = 0;
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => {
+        const runtimeId = ++runtimeCount;
+        return {
+          close: async () => {},
+          render: async (input) => {
+            renderCalls.push({ ...input, runtimeId });
+            if (renderCalls.length === 1) {
+              return {
+                diagnostics: [
+                  {
+                    fatal: true,
+                    message: 'Unsupported question type from edited info.json',
+                    name: 'ExpectedPreviewFailure',
+                    phase: 'metadata',
+                  },
+                ],
+                ok: false,
+              };
+            }
+
+            return {
+              diagnostics: [],
+              ok: true,
+              payload: {
+                bodyHtml: '<p>Rendered after expected failure</p>',
+                headHtml: '',
+                variant: { seed: input.variantSeed ?? '1' },
+              },
+            };
+          },
+        };
+      },
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const diagnostic = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
+      const diagnosticHtml = await diagnostic.text();
+
+      assert.equal(diagnostic.status, 422);
+      assert.match(diagnosticHtml, /Unsupported question type from edited info\.json/);
+
+      const refresh = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
+      const refreshHtml = await refresh.text();
+
+      assert.equal(refresh.status, 200);
+      assert.match(refreshHtml, /Rendered after expected failure/);
+      assert.equal(runtimeCount, 1);
+      assert.deepEqual(renderCalls, [
+        { qid: 'demo/example', runtimeId: 1, variantSeed: '1' },
+        { qid: 'demo/example', runtimeId: 1, variantSeed: '1' },
+      ]);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('replaces the runtime after infrastructure failures so a later refresh can render', async () => {
+    const courseDir = await makeTempCourse();
+    const closedRuntimeIds: number[] = [];
+    let runtimeCount = 0;
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => {
+        const runtimeId = ++runtimeCount;
+        return {
+          close: async () => {
+            closedRuntimeIds.push(runtimeId);
+          },
+          render: async (input) => {
+            if (runtimeId === 1) {
+              throw new Error('preview runtime crashed');
+            }
+
+            return {
+              diagnostics: [],
+              ok: true,
+              payload: {
+                bodyHtml: `<p>Recovered on runtime ${runtimeId}</p>`,
+                headHtml: '',
+                variant: { seed: input.variantSeed ?? '1' },
+              },
+            };
+          },
+        };
+      },
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const failed = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
+      const failedHtml = await failed.text();
+
+      assert.equal(failed.status, 500);
+      assert.match(failedHtml, /preview runtime crashed/);
+      assert.deepEqual(closedRuntimeIds, [1]);
+
+      const refresh = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
+      const refreshHtml = await refresh.text();
+
+      assert.equal(refresh.status, 200);
+      assert.match(refreshHtml, /Recovered on runtime 2/);
+      assert.equal(runtimeCount, 2);
+    } finally {
+      await started.close();
+      assert.deepEqual(closedRuntimeIds, [1, 2]);
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('serves direct preview HTML rendered through the PrairieLearn runtime', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestion(courseDir, 'runtime/simple');
@@ -240,6 +359,93 @@ describe('question preview server direct preview route', () => {
       assert.match(html, /Runtime direct preview body/);
       assert.match(html, /class="question-container"/);
       nodeAssert.doesNotMatch(html, /New Variant|Question ID|Variant:/i);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('observes question.html, info.json, and server.py edits on repeated direct preview requests', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'runtime/source-refresh';
+
+    const writeInfo = async (type: string) => {
+      await writeQuestionFile(
+        courseDir,
+        qid,
+        'info.json',
+        JSON.stringify({
+          title: 'Refresh source preview',
+          topic: 'Testing',
+          type,
+          uuid: '11111111-1111-4111-8111-111111111125',
+        }),
+      );
+    };
+    const writeServer = async (message: string) => {
+      await writeQuestionFile(
+        courseDir,
+        qid,
+        'server.py',
+        `def generate(data):\n    data["params"]["server_message"] = "${message}"\n`,
+      );
+    };
+
+    await writeInfo('v3');
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<p>HTML edit one {{params.server_message}}</p>',
+    );
+    await writeServer('server edit one');
+
+    const started = await startQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--cache-type', 'memory', '--port', '0'],
+    });
+
+    try {
+      const previewUrl = `${serverUrl(started)}/questions/${qid}?variant=1`;
+      const first = await fetch(previewUrl);
+      const firstHtml = await first.text();
+
+      assert.equal(first.status, 200);
+      assert.match(firstHtml, /HTML edit one/);
+      assert.match(firstHtml, /server edit one/);
+
+      await writeQuestionFile(
+        courseDir,
+        qid,
+        'question.html',
+        '<p>HTML edit two {{params.server_message}}</p>',
+      );
+
+      const htmlRefresh = await fetch(previewUrl);
+      const htmlRefreshBody = await htmlRefresh.text();
+
+      assert.equal(htmlRefresh.status, 200);
+      assert.match(htmlRefreshBody, /HTML edit two/);
+      nodeAssert.doesNotMatch(htmlRefreshBody, /HTML edit one/);
+      assert.match(htmlRefreshBody, /server edit one/);
+
+      await writeInfo('MultipleChoice');
+
+      const metadataRefresh = await fetch(previewUrl);
+      const metadataRefreshBody = await metadataRefresh.text();
+
+      assert.equal(metadataRefresh.status, 422);
+      assert.match(metadataRefreshBody, /Unsupported preview question type: MultipleChoice/);
+
+      await writeInfo('v3');
+      await writeServer('server edit two');
+
+      const serverRefresh = await fetch(previewUrl);
+      const serverRefreshBody = await serverRefresh.text();
+
+      assert.equal(serverRefresh.status, 200);
+      assert.match(serverRefreshBody, /HTML edit two/);
+      assert.match(serverRefreshBody, /server edit two/);
+      nodeAssert.doesNotMatch(serverRefreshBody, /server edit one/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });

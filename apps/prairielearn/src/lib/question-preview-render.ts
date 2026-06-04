@@ -9,6 +9,7 @@ import { HeadContents } from '../components/HeadContents.js';
 import { QuestionHeadContents } from '../components/QuestionHeadContents.js';
 import * as questionServers from '../question-servers/index.js';
 import * as freeformServer from '../question-servers/freeform.js';
+import type { QuestionCaller } from '../question-servers/types.js';
 import {
   defaultWorkspaceOptions,
   QuestionJsonSchema,
@@ -143,6 +144,7 @@ export function makePreviewCourse(courseDir: string): Course {
     json_comment: null,
     options: {},
     path: courseDir,
+    questions_receive_user_data: false,
     repository: null,
     sharing_name: null,
     sharing_token: 'preview-render',
@@ -154,6 +156,14 @@ export function makePreviewCourse(courseDir: string): Course {
     template_course: false,
     title: 'Preview render course',
     yearly_enrollment_limit: null,
+  };
+}
+
+function makePreviewQuestionCaller(course: Course): QuestionCaller {
+  return {
+    effectiveUserId: null,
+    groupId: null,
+    variantCourse: { id: course.id },
   };
 }
 
@@ -541,6 +551,7 @@ async function renderQuestionPreviewInRuntime({
     const resolvedCourseDir = path.resolve(courseDir);
     const info = await readQuestionInfo(resolvedCourseDir, qid);
     const course = makePreviewCourse(resolvedCourseDir);
+    const caller = makePreviewQuestionCaller(course);
     const question = makePreviewQuestion(qid, info);
 
     if (question.type !== 'Freeform') {
@@ -562,6 +573,7 @@ async function renderQuestionPreviewInRuntime({
       course,
       variantSeed,
       preferences,
+      caller,
     );
     const generateIssues = generateResult.courseIssues;
     const sanitizePaths = [resolvedCourseDir];
@@ -581,7 +593,7 @@ async function renderQuestionPreviewInRuntime({
     };
 
     phase = 'prepare';
-    const prepareResult = await questionServer.prepare(question, course, generatedVariant);
+    const prepareResult = await questionServer.prepare(question, course, generatedVariant, caller);
     const prepareIssues = prepareResult.courseIssues;
     const prepareDiagnostics = diagnosticsFromIssues(prepareIssues, 'prepare', {
       sanitizePaths,
@@ -606,6 +618,7 @@ async function renderQuestionPreviewInRuntime({
       submission: null,
       submissions: [],
       variant: preparedVariant,
+      caller,
     });
     const renderDiagnostics = diagnosticsFromIssues(renderResult.courseIssues, 'render', {
       sanitizePaths,
