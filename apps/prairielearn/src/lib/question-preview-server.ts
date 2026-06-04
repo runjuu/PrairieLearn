@@ -261,27 +261,6 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
 }
 
 /**
- * Renders a generic preview error document without exposing internal render
- * details.
- */
-function renderPreviewErrorDocument() {
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Question Preview Error</title>
-</head>
-<body>
-<main>
-<h1>Question preview failed</h1>
-<p>Check the preview server console for details.</p>
-</main>
-</body>
-</html>`;
-}
-
-/**
  * Decodes a route suffix into safe path segments for bounded asset lookup.
  *
  * @param encodedPath - URL-encoded route suffix after the asset-route prefix.
@@ -583,24 +562,34 @@ function registerGeneratedFilesAssetRoutes(app: Express, generatedFilesRoot: str
     });
 }
 
+type PreviewDocumentContent = Pick<QuestionPreviewPayload, 'bodyHtml' | 'headHtml'>;
+
 /**
- * Wraps rendered question fragments in a full HTML document for the browser.
+ * Wraps preview document fragments in a full HTML document for the browser.
  *
- * @param payload - Rendered question HTML fragments from the preview runtime.
+ * @param content - HTML fragments to render in the document head and body.
  */
-function renderPreviewDocument(payload: QuestionPreviewPayload) {
+function renderPreviewDocument(content: PreviewDocumentContent) {
   return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-${payload.headHtml}
+${content.headHtml}
 </head>
 <body>
-${payload.bodyHtml}
+${content.bodyHtml}
 </body>
 </html>`;
 }
+
+const PREVIEW_ERROR_DOCUMENT = renderPreviewDocument({
+  bodyHtml: `<main>
+<h1>Question preview failed</h1>
+<p>Check the preview server console for details.</p>
+</main>`,
+  headHtml: '<title>Question Preview Error</title>',
+});
 
 /**
  * Checks whether a qid would escape or confuse the course question namespace.
@@ -641,7 +630,7 @@ async function handleQuestionPreviewRequest({
   runtime,
 }: HandleQuestionPreviewRequestParams) {
   if (invalidQuestionPreviewQid(qid)) {
-    res.status(422).type('html').send(renderPreviewErrorDocument());
+    res.status(422).type('html').send(PREVIEW_ERROR_DOCUMENT);
     return;
   }
 
@@ -665,7 +654,7 @@ async function handleQuestionPreviewRequest({
     res.status(200).type('html').send(renderPreviewDocument(result.payload));
   } else {
     console.error('Question preview render failed:', result.diagnostics);
-    res.status(422).type('html').send(renderPreviewErrorDocument());
+    res.status(422).type('html').send(PREVIEW_ERROR_DOCUMENT);
   }
 }
 
@@ -686,7 +675,7 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
     }
 
     console.error('Question preview request failed:', err);
-    res.status(500).type('html').send(renderPreviewErrorDocument());
+    res.status(500).type('html').send(PREVIEW_ERROR_DOCUMENT);
   };
 }
 
