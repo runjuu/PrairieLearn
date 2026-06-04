@@ -17,10 +17,8 @@ yarn workspace @prairielearn/prairielearn preview:server -- --course-dir /absolu
 ```
 
 Open direct preview URLs such as `http://127.0.0.1:4310/questions/<qid>?variant=1`,
-where `<qid>` is relative to the course `questions/` directory. The optional
-`PrairieLearn-Render-Demo` Next.js app can browse `GET /api/questions`, but the direct server URLs
-are the canonical local preview surface. Edit local course files and refresh the browser to render
-the current files.
+where `<qid>` is relative to the course `questions/` directory. Edit local course files and refresh
+the browser to render the current files.
 
 The standalone local server is unsandboxed in v1. Rendering may execute question `server.py` under
 the developer account, and question code has the developer account's normal outbound network access.
