@@ -13,15 +13,18 @@ import {
   type QuestionPreviewRuntimeOptions,
   type QuestionPreviewWorkersExecutionMode,
 } from './question-preview-render.js';
+import { discoverInfoDirs } from './discover-info-dirs.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4310;
 const DEFAULT_QUESTION_TIMEOUT_MS = 5000;
 const DEFAULT_RENDER_TIMEOUT_MS = 10000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
+const DEFAULT_CORS_ORIGINS = ['http://127.0.0.1:3000', 'http://localhost:3000'];
 
 export interface QuestionPreviewServerOptions {
   cacheType: QuestionPreviewCacheType;
+  corsOrigins: string[];
   courseDir: string;
   devMode: boolean;
   host: string;
@@ -31,6 +34,14 @@ export interface QuestionPreviewServerOptions {
   startupTimeoutMilliseconds: number;
   workersCount: number;
   workersExecutionMode: QuestionPreviewWorkersExecutionMode;
+}
+
+export interface QuestionDiscoveryItem {
+  previewUrl: string;
+  qid: string;
+  title: string;
+  topic: string | null;
+  type: string;
 }
 
 export interface StartedQuestionPreviewServer {
@@ -43,6 +54,13 @@ export interface StartedQuestionPreviewServer {
 function stringArg(argv: Record<string, unknown>, primary: string) {
   const value = argv[primary];
   if (typeof value === 'string' && value.length > 0) return value;
+  return undefined;
+}
+
+function stringArrayArg(argv: Record<string, unknown>, primary: string) {
+  const value = argv[primary];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
+  if (typeof value === 'string' && value.length > 0) return [value];
   return undefined;
 }
 
@@ -88,6 +106,24 @@ function parseCacheType(value: string | undefined): QuestionPreviewCacheType {
   return cacheType;
 }
 
+function parseCorsOrigins(values: string[] | undefined) {
+  const rawOrigins = values ?? DEFAULT_CORS_ORIGINS;
+  const origins = rawOrigins.flatMap((value) => value.split(',').map((origin) => origin.trim()));
+  const parsedOrigins = origins
+    .filter((origin) => origin.length > 0)
+    .map((origin) => {
+      try {
+        const url = new URL(origin);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error();
+        return url.origin;
+      } catch {
+        throw new Error(`Invalid --cors-origin "${origin}". Expected an HTTP(S) origin.`);
+      }
+    });
+
+  return [...new Set(parsedOrigins)];
+}
+
 async function assertValidCourseDir(courseDir: string) {
   try {
     const stat = await fs.stat(courseDir);
@@ -107,6 +143,7 @@ export async function parseQuestionPreviewServerOptions(
     boolean: ['dev-mode'],
     string: [
       'cache-type',
+      'cors-origin',
       'course-dir',
       'host',
       'port',
@@ -125,6 +162,7 @@ export async function parseQuestionPreviewServerOptions(
   const supportedFlags = new Set([
     '_',
     'cache-type',
+    'cors-origin',
     'course-dir',
     'dev-mode',
     'host',
@@ -150,6 +188,7 @@ export async function parseQuestionPreviewServerOptions(
 
   return {
     cacheType: parseCacheType(stringArg(argv, 'cache-type')),
+    corsOrigins: parseCorsOrigins(stringArrayArg(argv, 'cors-origin')),
     courseDir,
     devMode: booleanArg(argv, 'dev-mode'),
     host: stringArg(argv, 'host') ?? DEFAULT_HOST,
@@ -273,6 +312,20 @@ function sendHtml(res: http.ServerResponse, statusCode: number, html: string) {
   res.end(html);
 }
 
+function sendJson(
+  res: http.ServerResponse,
+  statusCode: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+) {
+  res.writeHead(statusCode, {
+    'cache-control': 'no-store',
+    'content-type': 'application/json; charset=utf-8',
+    ...headers,
+  });
+  res.end(JSON.stringify(body));
+}
+
 function renderPreviewDocument(payload: QuestionPreviewPayload) {
   return `<!doctype html>
 <html>
@@ -319,6 +372,115 @@ function qidFromPathname(pathname: string) {
   } catch {
     return null;
   }
+}
+
+function previewUrlForQid(qid: string) {
+  return `/questions/${qid.split('/').map(encodeURIComponent).join('/')}?variant=1`;
+}
+
+function questionDiscoveryItem(qid: string, info: Record<string, unknown>): QuestionDiscoveryItem {
+  if (
+    typeof info.title !== 'string' ||
+    typeof info.topic !== 'string' ||
+    typeof info.type !== 'string'
+  ) {
+    throw new Error('Expected info.json to contain string title, topic, and type fields.');
+  }
+
+  return {
+    previewUrl: previewUrlForQid(qid),
+    qid,
+    title: info.title,
+    topic: info.topic,
+    type: info.type,
+  };
+}
+
+function invalidQuestionDiscoveryItem(qid: string): QuestionDiscoveryItem {
+  return {
+    previewUrl: previewUrlForQid(qid),
+    qid,
+    title: qid,
+    topic: null,
+    type: 'invalid-info-json',
+  };
+}
+
+export async function listQuestionDiscoveryItems(
+  courseDir: string,
+): Promise<QuestionDiscoveryItem[]> {
+  const questionsRoot = path.join(courseDir, 'questions');
+  const qids = await discoverInfoDirs(questionsRoot, 'info.json');
+  const questions = await Promise.all(
+    qids.map(async (qidPath) => {
+      const qid = qidPath.split(path.sep).join('/');
+      const infoPath = path.join(questionsRoot, qidPath, 'info.json');
+      try {
+        const info = JSON.parse(await fs.readFile(infoPath, 'utf8')) as unknown;
+        if (typeof info !== 'object' || info == null || Array.isArray(info)) {
+          throw new Error('Expected info.json to contain an object.');
+        }
+        return questionDiscoveryItem(qid, info as Record<string, unknown>);
+      } catch {
+        return invalidQuestionDiscoveryItem(qid);
+      }
+    }),
+  );
+  return questions.sort((a, b) => a.qid.localeCompare(b.qid));
+}
+
+function requestHeaderValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function discoveryCorsHeaders(
+  options: QuestionPreviewServerOptions,
+  req: http.IncomingMessage,
+  headers: Record<string, string> = {},
+) {
+  const origin = requestHeaderValue(req.headers.origin);
+  if (origin == null || !options.corsOrigins.includes(origin)) return headers;
+
+  return {
+    ...headers,
+    'access-control-allow-origin': origin,
+    vary: 'Origin',
+  };
+}
+
+async function handleQuestionDiscoveryRequest({
+  options,
+  req,
+  res,
+}: {
+  options: QuestionPreviewServerOptions;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+}) {
+  if (req.method === 'OPTIONS') {
+    const requestHeaders = requestHeaderValue(req.headers['access-control-request-headers']);
+    res.writeHead(
+      204,
+      discoveryCorsHeaders(options, req, {
+        'access-control-allow-methods': 'GET, OPTIONS',
+        ...(requestHeaders ? { 'access-control-allow-headers': requestHeaders } : {}),
+      }),
+    );
+    res.end();
+    return;
+  }
+
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: 'Method not allowed' }, discoveryCorsHeaders(options, req));
+    return;
+  }
+
+  sendJson(
+    res,
+    200,
+    await listQuestionDiscoveryItems(options.courseDir),
+    discoveryCorsHeaders(options, req),
+  );
 }
 
 async function handleQuestionPreviewRequest({
@@ -376,7 +538,13 @@ export async function startQuestionPreviewServer({
     runtimeOptions,
   );
   const server = http.createServer((req, res) => {
-    handleQuestionPreviewRequest({ options, req, res, runtime }).catch((err) => {
+    const url = new URL(req.url ?? '/', `http://${options.host}:${options.port}`);
+    const handler =
+      url.pathname === '/api/questions'
+        ? handleQuestionDiscoveryRequest
+        : handleQuestionPreviewRequest;
+
+    handler({ options, req, res, runtime }).catch((err) => {
       const diagnostic: QuestionPreviewDiagnostic = {
         fatal: true,
         message: err instanceof Error ? err.message : String(err),
