@@ -14,12 +14,10 @@ const DEFAULT_PORT = 4310;
 const DEFAULT_QUESTION_TIMEOUT_MS = 5000;
 const DEFAULT_RENDER_TIMEOUT_MS = 10000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
-const DEFAULT_CORS_ORIGINS = ['http://127.0.0.1:3000', 'http://localhost:3000'];
 
 const SUPPORTED_FLAGS = new Set([
   '_',
   'cache-type',
-  'cors-origin',
   'course-dir',
   'dev-mode',
   'host',
@@ -33,7 +31,6 @@ const SUPPORTED_FLAGS = new Set([
 
 export interface QuestionPreviewServerOptions {
   cacheType: QuestionPreviewCacheType;
-  corsOrigins: string[];
   courseDir: string;
   devMode: boolean;
   host: string;
@@ -75,22 +72,6 @@ function requiredSingleStringFlagSchema(flagName: string, missingMessage: string
     }
 
     return value;
-  });
-}
-
-function stringArrayFlagSchema(flagName: string) {
-  return z.unknown().transform((value, ctx) => {
-    if (value == null) return undefined;
-
-    const values = Array.isArray(value) ? value : [value];
-    if (
-      values.length === 0 ||
-      values.some((item) => typeof item !== 'string' || item.length === 0)
-    ) {
-      return addIssue(ctx, `Invalid --${flagName}. Expected one or more non-empty values.`);
-    }
-
-    return values as string[];
   });
 }
 
@@ -148,31 +129,8 @@ function parseCacheType(value: string | undefined, ctx: z.RefinementCtx): Questi
   return cacheType;
 }
 
-function parseCorsOrigins(values: string[] | undefined, ctx: z.RefinementCtx) {
-  const rawOrigins = values ?? DEFAULT_CORS_ORIGINS;
-  const origins = rawOrigins.flatMap((value) => value.split(',').map((origin) => origin.trim()));
-  const parsedOrigins: string[] = [];
-
-  for (const origin of origins) {
-    if (origin.length === 0) {
-      return addIssue(ctx, 'Invalid --cors-origin "". Expected an HTTP(S) origin.');
-    }
-
-    try {
-      const url = new URL(origin);
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error();
-      parsedOrigins.push(url.origin);
-    } catch {
-      return addIssue(ctx, `Invalid --cors-origin "${origin}". Expected an HTTP(S) origin.`);
-    }
-  }
-
-  return [...new Set(parsedOrigins)];
-}
-
 const QuestionPreviewServerOptionsSchema = z.object({
   cacheType: singleStringFlagSchema('cache-type').transform(parseCacheType),
-  corsOrigins: stringArrayFlagSchema('cors-origin').transform(parseCorsOrigins),
   courseDir: requiredSingleStringFlagSchema(
     'course-dir',
     'Missing required --course-dir <path> for the local preview server.',
@@ -216,7 +174,6 @@ export async function parseQuestionPreviewServerOptions(
     boolean: ['dev-mode'],
     string: [
       'cache-type',
-      'cors-origin',
       'course-dir',
       'host',
       'port',
@@ -239,7 +196,6 @@ export async function parseQuestionPreviewServerOptions(
 
   const parsed = QuestionPreviewServerOptionsSchema.safeParse({
     cacheType: argv['cache-type'],
-    corsOrigins: argv['cors-origin'],
     courseDir: argv['course-dir'],
     devMode: argv['dev-mode'],
     host: argv.host,
