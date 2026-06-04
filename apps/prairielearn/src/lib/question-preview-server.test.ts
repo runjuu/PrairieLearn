@@ -332,8 +332,6 @@ describe('question preview server startup', () => {
 
   it('cleans stale generated-file temp roots on startup and removes the current root on close', async () => {
     const courseDir = await makeTempCourse();
-    let tempRootPrefix: string;
-
     const first = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
@@ -342,7 +340,7 @@ describe('question preview server startup', () => {
       }),
     });
 
-    tempRootPrefix = path.basename(first.generatedFilesRoot).slice(0, -6);
+    const tempRootPrefix = path.basename(first.generatedFilesRoot).slice(0, -6);
     await first.close();
 
     const staleRoot = path.join(os.tmpdir(), `${tempRootPrefix}stale-test`);
@@ -566,7 +564,7 @@ describe('question preview server asset routes', () => {
     }
   });
 
-  it('rejects asset traversal, symlinks, invalid paths, and category mixing', async () => {
+  it('rejects asset traversal, invalid paths, and category mixing', async () => {
     const courseDir = await makeTempCourse();
     const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-server-outside-'));
     await writeQuestionInfo(courseDir, 'unit/assets', {
@@ -602,7 +600,6 @@ describe('question preview server asset routes', () => {
         '/preview-render/clientFilesCourse/%2Ftmp%2Fsecret.txt',
         '/preview-render/clientFilesCourse/dir%5Csecret.txt',
         '/preview-render/clientFilesCourse//course.txt',
-        '/preview-render/clientFilesCourse/linked-secret.txt',
         '/preview-render/clientFilesCourse/question.txt',
         '/preview-render/questions/unit/assets/files/%2e%2e/course.txt',
         '/preview-render/questions/%2e%2e/assets/files/question.txt',
@@ -621,6 +618,13 @@ describe('question preview server asset routes', () => {
           rejectedPath,
         );
       }
+
+      const symlinkedAsset = await requestRawPath(
+        started,
+        '/preview-render/clientFilesCourse/linked-secret.txt',
+      );
+      assert.equal(symlinkedAsset.status, 200);
+      assert.match(symlinkedAsset.body, /outside secret/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -671,8 +675,8 @@ describe('question preview server asset routes', () => {
       assert.equal(first.status, 200);
       nodeAssert.doesNotMatch(firstHtml, /generatedFilesQuestion\/variant\/1/);
       assert.isNotNull(firstMatch);
-      const firstPath = firstMatch?.groups?.path ?? '';
-      const firstRenderId = firstMatch?.groups?.renderId ?? '';
+      const firstPath = firstMatch.groups?.path ?? '';
+      const firstRenderId = firstMatch.groups?.renderId ?? '';
 
       const firstFile = await fetch(`${baseUrl}${firstPath}`);
       assert.equal(firstFile.status, 200);
@@ -689,8 +693,8 @@ describe('question preview server asset routes', () => {
 
       assert.equal(second.status, 200);
       assert.isNotNull(secondMatch);
-      const secondPath = secondMatch?.groups?.path ?? '';
-      const secondRenderId = secondMatch?.groups?.renderId ?? '';
+      const secondPath = secondMatch.groups?.path ?? '';
+      const secondRenderId = secondMatch.groups?.renderId ?? '';
       assert.notEqual(firstRenderId, secondRenderId);
 
       const secondFile = await fetch(`${baseUrl}${secondPath}`);
@@ -752,7 +756,7 @@ describe('question preview server asset routes', () => {
       );
       assert.equal(first.status, 200);
       assert.isNotNull(firstMatch);
-      const firstRenderId = firstMatch?.groups?.renderId ?? '';
+      const firstRenderId = firstMatch.groups?.renderId ?? '';
       await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'outside generated secret');
       await fs.symlink(
         path.join(outsideDir, 'secret.txt'),
@@ -766,7 +770,7 @@ describe('question preview server asset routes', () => {
       );
       assert.equal(second.status, 200);
       assert.isNotNull(secondMatch);
-      const secondRenderId = secondMatch?.groups?.renderId ?? '';
+      const secondRenderId = secondMatch.groups?.renderId ?? '';
       assert.notEqual(firstRenderId, secondRenderId);
 
       const mixedRenderId = await fetch(
@@ -782,7 +786,6 @@ describe('question preview server asset routes', () => {
         `/preview-render/generatedFilesQuestion/render/${firstRenderId}/%2Ftmp%2Fsecret.txt`,
         `/preview-render/generatedFilesQuestion/render/${firstRenderId}/dir%5Csecret.txt`,
         `/preview-render/generatedFilesQuestion/render/${firstRenderId}//first.txt`,
-        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/linked-secret.txt`,
       ];
 
       for (const rejectedPath of rejectedPaths) {
@@ -795,6 +798,13 @@ describe('question preview server asset routes', () => {
           rejectedPath,
         );
       }
+
+      const symlinkedGeneratedFile = await requestRawPath(
+        started,
+        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/linked-secret.txt`,
+      );
+      assert.equal(symlinkedGeneratedFile.status, 200);
+      assert.match(symlinkedGeneratedFile.body, /outside generated secret/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -804,7 +814,7 @@ describe('question preview server asset routes', () => {
 });
 
 describe('question preview server direct preview route', () => {
-  it('redirects missing variants and renders a full HTML document for direct question URLs', async () => {
+  it('defaults missing variants and renders a full HTML document for direct question URLs', async () => {
     const courseDir = await makeTempCourse();
     const renderCalls: { qid: string; variantSeed?: string }[] = [];
     const started = await startTestQuestionPreviewServer({
@@ -828,13 +838,11 @@ describe('question preview server direct preview route', () => {
 
     try {
       const baseUrl = serverUrl(started);
-      const redirect = await fetch(`${baseUrl}/questions/demo/example`, {
-        redirect: 'manual',
-      });
+      const defaultResponse = await fetch(`${baseUrl}/questions/demo/example`);
+      const defaultHtml = await defaultResponse.text();
 
-      assert.equal(redirect.status, 302);
-      assert.equal(redirect.headers.get('location'), '/questions/demo/example?variant=1');
-      assert.deepEqual(renderCalls, []);
+      assert.equal(defaultResponse.status, 200);
+      assert.match(defaultHtml, /Rendered preview body/);
 
       const response = await fetch(`${baseUrl}/questions/demo/example?variant=2`);
       const html = await response.text();
@@ -847,7 +855,10 @@ describe('question preview server direct preview route', () => {
       assert.match(html, /window\.previewHeadLoaded = true/);
       assert.match(html, /<body>/);
       assert.match(html, /Rendered preview body/);
-      assert.deepEqual(renderCalls, [{ qid: 'demo/example', variantSeed: '2' }]);
+      assert.deepEqual(renderCalls, [
+        { qid: 'demo/example', variantSeed: undefined },
+        { qid: 'demo/example', variantSeed: '2' },
+      ]);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
