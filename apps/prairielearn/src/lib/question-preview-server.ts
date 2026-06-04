@@ -259,53 +259,11 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
 }
 
 /**
- * Sends a non-cacheable HTML response.
- *
- * @param res - Node HTTP response object.
- * @param statusCode - HTTP status code to send.
- * @param html - Complete HTML document body.
+ * Renders a generic preview error document without exposing internal render
+ * details.
  */
-function sendHtml(res: http.ServerResponse, statusCode: number, html: string) {
-  res.writeHead(statusCode, {
-    'cache-control': 'no-store',
-    'content-type': 'text/html; charset=utf-8',
-  });
-  res.end(html);
-}
-
-/**
- * Sends a non-cacheable JSON response.
- *
- * @param res - Node HTTP response object.
- * @param statusCode - HTTP status code to send.
- * @param body - Value to serialize as JSON.
- * @param headers - Additional response headers to include.
- */
-function sendJson(
-  res: http.ServerResponse,
-  statusCode: number,
-  body: unknown,
-  headers: Record<string, string> = {},
-) {
-  res.writeHead(statusCode, {
-    'cache-control': 'no-store',
-    'content-type': 'application/json; charset=utf-8',
-    ...headers,
-  });
-  res.end(JSON.stringify(body));
-}
-
-/**
- * Sends a generic preview error page without exposing internal render details.
- *
- * @param res - Node HTTP response object.
- * @param statusCode - HTTP status code to send.
- */
-function sendPreviewError(res: http.ServerResponse, statusCode: number) {
-  sendHtml(
-    res,
-    statusCode,
-    `<!doctype html>
+function renderPreviewErrorDocument() {
+  return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -318,21 +276,7 @@ function sendPreviewError(res: http.ServerResponse, statusCode: number) {
 <p>Check the preview server console for details.</p>
 </main>
 </body>
-</html>`,
-  );
-}
-
-/**
- * Sends an empty non-cacheable response.
- *
- * @param res - Node HTTP response object.
- * @param statusCode - HTTP status code to send.
- */
-function sendEmpty(res: http.ServerResponse, statusCode: number) {
-  res.writeHead(statusCode, {
-    'cache-control': 'no-store',
-  });
-  res.end();
+</html>`;
 }
 
 /**
@@ -599,15 +543,15 @@ function errorStatusCode(err: unknown) {
  * @param res - Express response used for `sendFile`.
  * @param assetRequest - Safe root and path-segment lookup request, or `null`.
  */
-async function sendBoundedAssetRequest(res: Response, assetRequest: BoundedAssetRequest | null) {
+async function handleBoundedAssetRequest(res: Response, assetRequest: BoundedAssetRequest | null) {
   if (assetRequest == null) {
-    sendEmpty(res, 404);
+    res.status(404).set('cache-control', 'no-store').end();
     return;
   }
 
   const filePath = await resolveBoundedFileFromRoots(assetRequest.roots, assetRequest.segments);
   if (filePath == null) {
-    sendEmpty(res, 404);
+    res.status(404).set('cache-control', 'no-store').end();
     return;
   }
 
@@ -638,7 +582,7 @@ async function handleStartupCourseAssetRequest(params: {
 }) {
   const { options, req, res } = params;
 
-  await sendBoundedAssetRequest(
+  await handleBoundedAssetRequest(
     res,
     startupCourseAssetRequestFromPathname(options.courseDir, rawRequestPathname(req)),
   );
@@ -659,7 +603,7 @@ async function handleGeneratedFilesAssetRequest(params: {
 }) {
   const { generatedFilesRoot, req, res } = params;
 
-  await sendBoundedAssetRequest(
+  await handleBoundedAssetRequest(
     res,
     generatedFilesAssetRequestFromPathname(generatedFilesRoot, rawRequestPathname(req)),
   );
@@ -689,7 +633,7 @@ function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreview
       }),
     );
     app.all(routePattern, (_req, res) => {
-      sendEmpty(res, 405);
+      res.status(405).set('cache-control', 'no-store').end();
     });
   }
 }
@@ -708,7 +652,7 @@ function registerGeneratedFilesAssetRoutes(app: Express, generatedFilesRoot: str
     }),
   );
   app.all(GENERATED_FILES_ROUTE_PATTERN, (_req, res) => {
-    sendEmpty(res, 405);
+    res.status(405).set('cache-control', 'no-store').end();
   });
 }
 
@@ -886,24 +830,25 @@ function discoveryCorsHeaders(
  * @param params - Discovery preflight inputs.
  * @param params.options - Preview-server options containing allowed origins.
  * @param params.req - Incoming preflight request.
- * @param params.res - Node HTTP response object.
+ * @param params.res - Express response object.
  */
 function handleQuestionDiscoveryPreflight(params: {
   options: QuestionPreviewServerOptions;
   req: http.IncomingMessage;
-  res: http.ServerResponse;
+  res: Response;
 }) {
   const { options, req, res } = params;
 
   const requestHeaders = requestHeaderValue(req.headers['access-control-request-headers']);
-  res.writeHead(
-    204,
-    discoveryCorsHeaders(options, req, {
-      'access-control-allow-methods': 'GET, OPTIONS',
-      ...(requestHeaders ? { 'access-control-allow-headers': requestHeaders } : {}),
-    }),
-  );
-  res.end();
+  res
+    .status(204)
+    .set(
+      discoveryCorsHeaders(options, req, {
+        'access-control-allow-methods': 'GET, OPTIONS',
+        ...(requestHeaders ? { 'access-control-allow-headers': requestHeaders } : {}),
+      }),
+    )
+    .end();
 }
 
 /**
@@ -913,21 +858,20 @@ function handleQuestionDiscoveryPreflight(params: {
  * @param params - Discovery GET inputs.
  * @param params.options - Preview-server options, including `courseDir`.
  * @param params.req - Incoming discovery API request.
- * @param params.res - Node HTTP response object.
+ * @param params.res - Express response object.
  */
 async function handleQuestionDiscoveryGet(params: {
   options: QuestionPreviewServerOptions;
   req: http.IncomingMessage;
-  res: http.ServerResponse;
+  res: Response;
 }) {
   const { options, req, res } = params;
 
-  sendJson(
-    res,
-    200,
-    await listQuestionDiscoveryItems(options.courseDir),
-    discoveryCorsHeaders(options, req),
-  );
+  res
+    .status(200)
+    .set('cache-control', 'no-store')
+    .set(discoveryCorsHeaders(options, req))
+    .json(await listQuestionDiscoveryItems(options.courseDir));
 }
 
 /**
@@ -936,16 +880,20 @@ async function handleQuestionDiscoveryGet(params: {
  * @param params - Discovery method-not-allowed inputs.
  * @param params.options - Preview-server options containing allowed origins.
  * @param params.req - Incoming discovery API request.
- * @param params.res - Node HTTP response object.
+ * @param params.res - Express response object.
  */
 function handleQuestionDiscoveryMethodNotAllowed(params: {
   options: QuestionPreviewServerOptions;
   req: http.IncomingMessage;
-  res: http.ServerResponse;
+  res: Response;
 }) {
   const { options, req, res } = params;
 
-  sendJson(res, 405, { error: 'Method not allowed' }, discoveryCorsHeaders(options, req));
+  res
+    .status(405)
+    .set('cache-control', 'no-store')
+    .set(discoveryCorsHeaders(options, req))
+    .json({ error: 'Method not allowed' });
 }
 
 /**
@@ -955,14 +903,14 @@ function handleQuestionDiscoveryMethodNotAllowed(params: {
  * @param params.generatedFilesRoot - Temp root for files produced by the render.
  * @param params.options - Preview-server options, including host, port, and course.
  * @param params.req - Incoming preview request.
- * @param params.res - Node HTTP response object.
+ * @param params.res - Express response object.
  * @param params.runtime - Runtime used to render the question.
  */
 async function handleQuestionPreviewRequest(params: {
   generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   req: http.IncomingMessage;
-  res: http.ServerResponse;
+  res: Response;
   runtime: QuestionPreviewRuntime;
 }) {
   const { generatedFilesRoot, options, req, res, runtime } = params;
@@ -971,19 +919,26 @@ async function handleQuestionPreviewRequest(params: {
   const pathname = rawRequestPathname(req);
   const qid = qidFromPathname(pathname);
   if (req.method !== 'GET' || qid == null) {
-    sendHtml(res, 404, '<!doctype html><html><body><h1>Not found</h1></body></html>');
+    res
+      .status(404)
+      .set('cache-control', 'no-store')
+      .type('html')
+      .send('<!doctype html><html><body><h1>Not found</h1></body></html>');
     return;
   }
 
   if (invalidQuestionPreviewQid(qid)) {
-    sendPreviewError(res, 422);
+    res
+      .status(422)
+      .set('cache-control', 'no-store')
+      .type('html')
+      .send(renderPreviewErrorDocument());
     return;
   }
 
   if (!url.searchParams.has('variant')) {
     url.searchParams.set('variant', '1');
-    res.writeHead(302, { location: `${pathname}${url.search}` });
-    res.end();
+    res.set('cache-control', 'no-store').redirect(302, `${pathname}${url.search}`);
     return;
   }
 
@@ -1002,12 +957,16 @@ async function handleQuestionPreviewRequest(params: {
   );
 
   if (result.ok) {
-    sendHtml(res, 200, renderPreviewDocument(result.payload));
+    res
+      .status(200)
+      .set('cache-control', 'no-store')
+      .type('html')
+      .send(renderPreviewDocument(result.payload));
     return;
   }
 
   logPreviewRenderFailureDetails(result.diagnostics);
-  sendPreviewError(res, 422);
+  res.status(422).set('cache-control', 'no-store').type('html').send(renderPreviewErrorDocument());
 }
 
 /**
@@ -1022,12 +981,16 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
 
     const status = errorStatusCode(err);
     if (status != null && status < 500) {
-      sendEmpty(res, status);
+      res.status(status).set('cache-control', 'no-store').end();
       return;
     }
 
     console.error('Question preview request failed:', err);
-    sendPreviewError(res, 500);
+    res
+      .status(500)
+      .set('cache-control', 'no-store')
+      .type('html')
+      .send(renderPreviewErrorDocument());
   };
 }
 
@@ -1081,7 +1044,7 @@ function createQuestionPreviewApp(params: {
       const rawPathname = rawRequestPathname(req);
 
       if (isAssetRoutePathname(rawPathname)) {
-        sendEmpty(res, 404);
+        res.status(404).set('cache-control', 'no-store').end();
         return;
       }
 
