@@ -260,13 +260,20 @@ export function makePreviewVariant(
   };
 }
 
-export function makePreviewLocals(urlPrefix: string): questionServers.QuestionRenderRequiredLocals {
+function assetUrlPath(pathSegments: string[]) {
+  return pathSegments.map(encodeURIComponent).join('/');
+}
+
+export function makePreviewLocals(
+  urlPrefix: string,
+  qid: string,
+): questionServers.QuestionRenderRequiredLocals {
   return {
     allowAnswerEditing: true,
     baseUrl: urlPrefix,
     clientFilesCourseUrl: `${urlPrefix}/clientFilesCourse`,
     clientFilesQuestionGeneratedFileUrl: `${urlPrefix}/generatedFilesQuestion/variant/${PREVIEW_VARIANT_ID}`,
-    clientFilesQuestionUrl: `${urlPrefix}/clientFilesQuestion`,
+    clientFilesQuestionUrl: `${urlPrefix}/questions/${assetUrlPath(qid.split('/'))}/files`,
     externalImageCaptureUrl: null,
     questionUrl: `${urlPrefix}/question/${PREVIEW_QUESTION_ID}/`,
     showCorrectAnswer: false,
@@ -612,7 +619,7 @@ async function renderQuestionPreviewInRuntime({
     phase = 'render';
     const renderResult = await questionServer.render({
       course,
-      locals: makePreviewLocals(urlPrefix),
+      locals: makePreviewLocals(urlPrefix, qid),
       question,
       renderSelection: { question: true },
       submission: null,
