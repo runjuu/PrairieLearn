@@ -319,6 +319,7 @@ interface BoundedAssetRequest {
 }
 
 const GENERATED_FILES_ROUTE_PREFIX = '/preview-render/generatedFilesQuestion/render/';
+const GENERATED_FILES_ROUTE_PATTERN = `${GENERATED_FILES_ROUTE_PREFIX}*`;
 
 function isGeneratedFilesAssetRoutePathname(pathname: string) {
   return pathname.startsWith(GENERATED_FILES_ROUTE_PREFIX);
@@ -501,6 +502,18 @@ function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreview
       sendEmpty(res, 405);
     });
   }
+}
+
+function registerGeneratedFilesAssetRoutes(app: Express, generatedFilesRoot: string) {
+  app.get(
+    GENERATED_FILES_ROUTE_PATTERN,
+    asyncHandler(async (req, res) => {
+      await handleGeneratedFilesAssetRequest({ generatedFilesRoot, req, res });
+    }),
+  );
+  app.all(GENERATED_FILES_ROUTE_PATTERN, (_req, res) => {
+    sendEmpty(res, 405);
+  });
 }
 
 function renderPreviewDocument(payload: QuestionPreviewPayload) {
@@ -883,20 +896,11 @@ function createQuestionPreviewApp({
   });
 
   registerStartupCourseAssetRoutes(app, options);
+  registerGeneratedFilesAssetRoutes(app, generatedFilesRoot);
 
   app.use(
     asyncHandler(async (req, res) => {
       const rawPathname = rawRequestPathname(req);
-
-      if (isGeneratedFilesAssetRoutePathname(rawPathname)) {
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          sendEmpty(res, 405);
-          return;
-        }
-
-        await handleGeneratedFilesAssetRequest({ generatedFilesRoot, req, res });
-        return;
-      }
 
       if (isAssetRoutePathname(rawPathname)) {
         sendEmpty(res, 404);
