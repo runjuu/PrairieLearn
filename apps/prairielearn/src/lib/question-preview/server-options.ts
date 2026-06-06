@@ -7,8 +7,8 @@ import { z } from 'zod';
 import {
   type QuestionPreviewCacheType,
   type QuestionPreviewWorkersExecutionMode,
-} from './question-preview-render.js';
-import type { QuestionPreviewRuntimeLifecycleStartupOptions } from './question-preview-runtime-lifecycle.js';
+} from './render.js';
+import type { QuestionPreviewRuntimeLifecycleStartupOptions } from './runtime-lifecycle.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4310;

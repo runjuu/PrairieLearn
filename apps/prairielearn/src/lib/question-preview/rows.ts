@@ -1,8 +1,8 @@
-import type { QuestionCaller } from '../question-servers/types.js';
-import { type QuestionJson, defaultWorkspaceOptions } from '../schemas/index.js';
+import type { QuestionCaller } from '../../question-servers/types.js';
+import { type QuestionJson, defaultWorkspaceOptions } from '../../schemas/index.js';
+import type { Course, Question, Variant } from '../db-types.js';
 
-import type { Course, Question, Variant } from './db-types.js';
-import type { QuestionPreviewQid } from './question-preview-qid.js';
+import type { QuestionPreviewQid } from './qid.js';
 
 const PREVIEW_COURSE_ID = '1';
 const PREVIEW_QUESTION_ID = '1';
