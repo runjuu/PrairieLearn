@@ -1,8 +1,5 @@
-import {
-  QUESTION_PREVIEW_ERROR_DOCUMENT,
-  type QuestionPreviewDocumentResult,
-} from './question-preview-document.js';
-import type { QuestionPreviewGeneratedFile } from './question-preview-generated-files.js';
+import { QUESTION_PREVIEW_ERROR_DOCUMENT, type QuestionPreviewDocumentResult } from './document.js';
+import type { QuestionPreviewGeneratedFile } from './generated-files.js';
 
 export type QuestionPreviewHttpResponse =
   | {

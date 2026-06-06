@@ -4,12 +4,9 @@ import path from 'node:path';
 
 import { assert, describe, it } from 'vitest';
 
-import {
-  createQuestionPreviewAssetResolver,
-  makeQuestionPreviewAssetUrls,
-} from './question-preview-assets.js';
-import { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
-import { type QuestionPreviewQid, parseQuestionPreviewQid } from './question-preview-qid.js';
+import { createQuestionPreviewAssetResolver, makeQuestionPreviewAssetUrls } from './assets.js';
+import { LocalPreviewGeneratedFiles } from './generated-files.js';
+import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 
 async function writeFile(root: string, filename: string, contents: string) {
   const fullPath = path.join(root, filename);

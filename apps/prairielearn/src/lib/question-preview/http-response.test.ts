@@ -1,16 +1,13 @@
 import { assert, describe, it } from 'vitest';
 
-import {
-  QUESTION_PREVIEW_ERROR_DOCUMENT,
-  type QuestionPreviewDiagnostic,
-} from './question-preview-document.js';
+import { QUESTION_PREVIEW_ERROR_DOCUMENT, type QuestionPreviewDiagnostic } from './document.js';
 import {
   mapQuestionPreviewAssetFileResponse,
   mapQuestionPreviewDocumentResponse,
   mapQuestionPreviewGeneratedFileResponse,
   mapQuestionPreviewInvalidQidResponse,
   mapQuestionPreviewRouteErrorResponse,
-} from './question-preview-http-response.js';
+} from './http-response.js';
 
 function testSuccessDocument() {
   return {

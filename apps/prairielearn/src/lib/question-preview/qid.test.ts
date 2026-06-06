@@ -5,7 +5,7 @@ import {
   parseQuestionPreviewQid,
   questionPreviewQidFromPathSegments,
   questionPreviewQidValidationError,
-} from './question-preview-qid.js';
+} from './qid.js';
 
 describe('question preview qid rule', () => {
   it('parses valid qids into decoded, path, and URL forms', () => {

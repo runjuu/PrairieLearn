@@ -1,9 +1,9 @@
 import { assert, describe, it } from 'vitest';
 
-import { QuestionJsonSchema } from '../schemas/index.js';
+import { QuestionJsonSchema } from '../../schemas/index.js';
 
-import { parseQuestionPreviewQid } from './question-preview-qid.js';
-import { makeLocalPreviewQuestionRows, makeLocalPreviewVariant } from './question-preview-rows.js';
+import { parseQuestionPreviewQid } from './qid.js';
+import { makeLocalPreviewQuestionRows, makeLocalPreviewVariant } from './rows.js';
 
 function parseQid(qid: string) {
   const result = parseQuestionPreviewQid(qid);
