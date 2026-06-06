@@ -2,8 +2,8 @@
 
 import { pathToFileURL } from 'node:url';
 
-import { createQuestionPreviewRuntime } from './lib/question-preview-render.js';
-import { startQuestionPreviewServer } from './lib/question-preview-server.js';
+import { createQuestionPreviewRuntime } from './lib/question-preview/render.js';
+import { startQuestionPreviewServer } from './lib/question-preview/server.js';
 
 async function main() {
   const started = await startQuestionPreviewServer({
@@ -12,10 +12,12 @@ async function main() {
   });
   const address = started.server.address();
   const port = typeof address === 'object' && address != null ? address.port : started.options.port;
-  console.log(`PrairieLearn preview server listening on http://${started.options.host}:${port}`);
+  process.stdout.write(
+    `PrairieLearn preview server listening on http://${started.options.host}:${port}\n`,
+  );
 }
 
-if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err);
     process.exitCode = 1;

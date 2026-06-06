@@ -2,12 +2,12 @@ import nodeAssert from 'node:assert/strict';
 
 import { assert, describe, it } from 'vitest';
 
-import type { QuestionPreviewDiagnostic } from './question-preview-document.js';
-import { type QuestionPreviewQid, parseQuestionPreviewQid } from './question-preview-qid.js';
+import type { QuestionPreviewDiagnostic } from './document.js';
+import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 import {
   type QuestionPreviewRuntimeFactory,
   createQuestionPreviewRuntimeLifecycle,
-} from './question-preview-runtime-lifecycle.js';
+} from './runtime-lifecycle.js';
 
 function testSuccessDocument(bodyHtml: string) {
   return {

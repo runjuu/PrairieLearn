@@ -1,11 +1,11 @@
-import type { QuestionPreviewDocumentInput } from './question-preview-document.js';
-import { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
+import type { QuestionPreviewDocumentInput } from './document.js';
+import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import type {
   QuestionPreviewCacheType,
   QuestionPreviewRuntime,
   QuestionPreviewRuntimeStartupOptions,
   QuestionPreviewWorkersExecutionMode,
-} from './question-preview-render.js';
+} from './render.js';
 
 const QUESTION_PREVIEW_URL_PREFIX = '/preview-render';
 

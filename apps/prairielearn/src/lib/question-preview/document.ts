@@ -4,17 +4,17 @@ import path from 'node:path';
 import { html, unsafeHtml } from '@prairielearn/html';
 import { generateSignedToken } from '@prairielearn/signed-token';
 
-import { HeadContents } from '../components/HeadContents.js';
-import { QuestionHeadContents } from '../components/QuestionHeadContents.js';
-import * as questionServers from '../question-servers/index.js';
-import { type QuestionJson, QuestionJsonSchema } from '../schemas/index.js';
+import { HeadContents } from '../../components/HeadContents.js';
+import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
+import * as questionServers from '../../question-servers/index.js';
+import { type QuestionJson, QuestionJsonSchema } from '../../schemas/index.js';
+import { config } from '../config.js';
+import type { Question, Variant } from '../db-types.js';
 
-import { config } from './config.js';
-import type { Question, Variant } from './db-types.js';
-import { makeQuestionPreviewAssetUrls } from './question-preview-assets.js';
-import { type LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
-import type { QuestionPreviewQid } from './question-preview-qid.js';
-import { makeLocalPreviewQuestionRows, makeLocalPreviewVariant } from './question-preview-rows.js';
+import { makeQuestionPreviewAssetUrls } from './assets.js';
+import { type LocalPreviewGeneratedFiles } from './generated-files.js';
+import type { QuestionPreviewQid } from './qid.js';
+import { makeLocalPreviewQuestionRows, makeLocalPreviewVariant } from './rows.js';
 
 export interface QuestionPreviewDocumentInput {
   qid: QuestionPreviewQid;

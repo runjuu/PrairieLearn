@@ -2,21 +2,21 @@ import path from 'node:path';
 
 import { cache } from '@prairielearn/cache';
 
-import * as freeformServer from '../question-servers/freeform.js';
+import * as freeformServer from '../../question-servers/freeform.js';
+import * as assets from '../assets.js';
+import * as codeCaller from '../code-caller/index.js';
+import { config } from '../config.js';
+import * as load from '../load.js';
 
-import * as assets from './assets.js';
-import * as codeCaller from './code-caller/index.js';
-import { config } from './config.js';
-import * as load from './load.js';
 import {
   type QuestionPreviewDocumentInput,
   type QuestionPreviewDocumentRenderer,
   type QuestionPreviewDocumentResult,
   createQuestionPreviewDocumentRenderer,
   makeQuestionPreviewDocumentFailureResult,
-} from './question-preview-document.js';
-import { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
-import { parseQuestionPreviewQid } from './question-preview-qid.js';
+} from './document.js';
+import { LocalPreviewGeneratedFiles } from './generated-files.js';
+import { parseQuestionPreviewQid } from './qid.js';
 
 const DEFAULT_PREVIEW_URL_PREFIX = '/preview-render';
 
