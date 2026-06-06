@@ -6,12 +6,9 @@ import path from 'node:path';
 
 import { assert, describe, it, vi } from 'vitest';
 
-import type { QuestionPreviewDiagnostic } from './question-preview-document.js';
-import { createQuestionPreviewRuntime } from './question-preview-render.js';
-import {
-  parseQuestionPreviewServerOptions,
-  startQuestionPreviewServer,
-} from './question-preview-server.js';
+import type { QuestionPreviewDiagnostic } from './document.js';
+import { createQuestionPreviewRuntime } from './render.js';
+import { parseQuestionPreviewServerOptions, startQuestionPreviewServer } from './server.js';
 
 type StartQuestionPreviewServerParams = Parameters<typeof startQuestionPreviewServer>[0];
 type StartTestQuestionPreviewServerParams = Omit<

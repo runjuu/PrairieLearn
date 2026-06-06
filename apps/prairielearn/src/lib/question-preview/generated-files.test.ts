@@ -1,7 +1,7 @@
 import { assert, describe, it } from 'vitest';
 
-import { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
-import { makeLocalPreviewVariant } from './question-preview-rows.js';
+import { LocalPreviewGeneratedFiles } from './generated-files.js';
+import { makeLocalPreviewVariant } from './rows.js';
 
 describe('local preview generated files', () => {
   it('creates local preview variant identities with generated-file URLs', () => {

@@ -7,10 +7,10 @@ import { assert, describe, it } from 'vitest';
 import {
   type QuestionPreviewDocumentRenderer,
   createQuestionPreviewDocumentRenderer,
-} from './question-preview-document.js';
-import { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
-import { type QuestionPreviewQid, parseQuestionPreviewQid } from './question-preview-qid.js';
-import { createQuestionPreviewRuntime } from './question-preview-render.js';
+} from './document.js';
+import { LocalPreviewGeneratedFiles } from './generated-files.js';
+import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
+import { createQuestionPreviewRuntime } from './render.js';
 
 async function makeTempCourse() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-document-'));

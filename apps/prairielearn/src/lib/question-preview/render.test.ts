@@ -4,8 +4,8 @@ import path from 'node:path';
 
 import { assert, describe, it } from 'vitest';
 
-import { type QuestionPreviewQid, parseQuestionPreviewQid } from './question-preview-qid.js';
-import { createQuestionPreviewRuntime, renderQuestionPreview } from './question-preview-render.js';
+import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
+import { createQuestionPreviewRuntime, renderQuestionPreview } from './render.js';
 
 async function makeTempCourse() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-render-'));
