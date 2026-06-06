@@ -1,11 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import type { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
-import {
-  type QuestionPreviewQid,
-  questionPreviewQidFromPathSegments,
-} from './question-preview-qid.js';
+import type { LocalPreviewGeneratedFiles } from './generated-files.js';
+import { type QuestionPreviewQid, questionPreviewQidFromPathSegments } from './qid.js';
 
 const STARTUP_COURSE_ASSET_ROUTES = [
   {

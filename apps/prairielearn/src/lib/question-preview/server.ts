@@ -8,9 +8,10 @@ import express, {
 } from 'express';
 import asyncHandler from 'express-async-handler';
 
-import * as assets from './assets.js';
-import { createQuestionPreviewAssetResolver } from './question-preview-assets.js';
-import type { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
+import * as assets from '../assets.js';
+
+import { createQuestionPreviewAssetResolver } from './assets.js';
+import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import {
   type QuestionPreviewHttpAction,
   type QuestionPreviewHttpResponse,
@@ -19,21 +20,21 @@ import {
   mapQuestionPreviewGeneratedFileResponse,
   mapQuestionPreviewInvalidQidResponse,
   mapQuestionPreviewRouteErrorResponse,
-} from './question-preview-http-response.js';
-import { parseQuestionPreviewQid } from './question-preview-qid.js';
-import type { QuestionPreviewRuntime } from './question-preview-render.js';
+} from './http-response.js';
+import { parseQuestionPreviewQid } from './qid.js';
+import type { QuestionPreviewRuntime } from './render.js';
 import {
   type QuestionPreviewRuntimeFactory,
   type QuestionPreviewRuntimeLifecycle,
   createQuestionPreviewRuntimeLifecycle,
-} from './question-preview-runtime-lifecycle.js';
+} from './runtime-lifecycle.js';
 import {
   type QuestionPreviewServerHttpOptions,
   type QuestionPreviewServerOptions,
   getQuestionPreviewServerHttpOptions,
   getQuestionPreviewServerRuntimeOptions,
   parseQuestionPreviewServerOptions,
-} from './question-preview-server-options.js';
+} from './server-options.js';
 
 export { parseQuestionPreviewServerOptions, type QuestionPreviewServerOptions };
 
