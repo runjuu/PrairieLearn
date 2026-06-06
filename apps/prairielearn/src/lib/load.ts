@@ -92,6 +92,7 @@ class LoadEstimator {
 
   _reportLoad() {
     debug(`LoadEstimator._reportLoad(): jobType = ${this.jobType}`);
+    // Non-positive values disable load reporting.
     if (config.reportIntervalSec <= 0) return;
     this._warnOldJobs();
     const params = {

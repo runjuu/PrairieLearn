@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { assert, describe, it, vi } from 'vitest';
 
+import type { QuestionPreviewDiagnostic } from './question-preview-document.js';
 import { createQuestionPreviewRuntime } from './question-preview-render.js';
 import {
   parseQuestionPreviewServerOptions,
@@ -67,16 +68,6 @@ async function writeQuestion(courseDir: string, qid: string) {
   await writeQuestionFile(courseDir, qid, 'question.html', '<p>Runtime direct preview body</p>');
 }
 
-async function pathExists(filePath: string) {
-  try {
-    await fs.stat(filePath);
-    return true;
-  } catch (err) {
-    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return false;
-    throw err;
-  }
-}
-
 function serverUrl(started: Awaited<ReturnType<typeof startQuestionPreviewServer>>) {
   const address = started.server.address();
   if (address == null || typeof address === 'string') {
@@ -119,6 +110,37 @@ async function requestRawPath(
   });
 }
 
+function testPreviewDocument(bodyHtml: string, headHtml = '') {
+  return `<!doctype html>
+<html>
+<head>
+${headHtml}
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`;
+}
+
+function testSuccessDocument(bodyHtml: string, headHtml = '') {
+  return {
+    diagnostics: [],
+    documentHtml: testPreviewDocument(bodyHtml, headHtml),
+    ok: true as const,
+  };
+}
+
+function testFailureDocument(diagnostics: QuestionPreviewDiagnostic[] = []) {
+  return {
+    diagnostics,
+    documentHtml: testPreviewDocument(`<main>
+<h1>Question preview failed</h1>
+<p>Check the preview server console for details.</p>
+</main>`),
+    ok: false as const,
+  };
+}
+
 describe('question preview server startup', () => {
   it('rejects a value-required startup flag when its value is omitted', async () => {
     const courseDir = await makeTempCourse();
@@ -145,8 +167,6 @@ describe('question preview server startup', () => {
         host: '127.0.0.1',
         port: 4310,
         questionTimeoutMilliseconds: 5000,
-        renderTimeoutMilliseconds: 10000,
-        startupTimeoutMilliseconds: 30000,
         workersCount: 1,
         workersExecutionMode: 'native',
       });
@@ -163,10 +183,6 @@ describe('question preview server startup', () => {
         '0',
         '--question-timeout-ms',
         '1',
-        '--render-timeout-ms',
-        '2',
-        '--startup-timeout-ms',
-        '3',
         '--workers-count',
         '4',
         '--workers-execution-mode',
@@ -180,8 +196,6 @@ describe('question preview server startup', () => {
         host: '0.0.0.0',
         port: 0,
         questionTimeoutMilliseconds: 1,
-        renderTimeoutMilliseconds: 2,
-        startupTimeoutMilliseconds: 3,
         workersCount: 4,
         workersExecutionMode: 'container',
       });
@@ -210,12 +224,12 @@ describe('question preview server startup', () => {
         message: /Invalid --question-timeout-ms/,
       },
       {
-        argv: ['--course-dir', courseDir, '--render-timeout-ms', '1.5'],
-        message: /Invalid --render-timeout-ms/,
+        argv: ['--course-dir', courseDir, '--render-timeout-ms', '1000'],
+        message: /Unsupported preview-server flag/,
       },
       {
-        argv: ['--course-dir', courseDir, '--startup-timeout-ms', 'abc'],
-        message: /Invalid --startup-timeout-ms/,
+        argv: ['--course-dir', courseDir, '--startup-timeout-ms', '1000'],
+        message: /Unsupported preview-server flag/,
       },
       {
         argv: ['--course-dir', courseDir, '--workers-count', '0'],
@@ -242,7 +256,7 @@ describe('question preview server startup', () => {
                 runtimeCreations++;
                 return {
                   close: async () => {},
-                  render: async () => ({ diagnostics: [], ok: false }),
+                  render: async () => testFailureDocument(),
                 };
               },
             }),
@@ -261,32 +275,22 @@ describe('question preview server startup', () => {
     const courseDir = await makeTempCourse();
     const missingCourseDir = path.join(os.tmpdir(), 'pl-preview-server-missing-course');
     const events: string[] = [];
-    const previousEnvCourseDir = process.env.PL_PREVIEW_COURSE_DIR;
 
-    try {
-      process.env.PL_PREVIEW_COURSE_DIR = courseDir;
-      await nodeAssert.rejects(
-        () =>
-          startTestQuestionPreviewServer({
-            argv: [],
-            createRuntime: async () => {
-              events.push('runtime');
-              return {
-                close: async () => {},
-                render: async () => ({ diagnostics: [], ok: false }),
-              };
-            },
-          }),
-        /--course-dir/,
-      );
-      assert.deepEqual(events, []);
-    } finally {
-      if (previousEnvCourseDir == null) {
-        delete process.env.PL_PREVIEW_COURSE_DIR;
-      } else {
-        process.env.PL_PREVIEW_COURSE_DIR = previousEnvCourseDir;
-      }
-    }
+    await nodeAssert.rejects(
+      () =>
+        startTestQuestionPreviewServer({
+          argv: [],
+          createRuntime: async () => {
+            events.push('runtime');
+            return {
+              close: async () => {},
+              render: async () => testFailureDocument(),
+            };
+          },
+        }),
+      /--course-dir/,
+    );
+    assert.deepEqual(events, []);
 
     await nodeAssert.rejects(
       () =>
@@ -294,7 +298,7 @@ describe('question preview server startup', () => {
           argv: ['--course-dir', missingCourseDir],
           createRuntime: async () => {
             events.push('runtime');
-            return { close: async () => {}, render: async () => ({ diagnostics: [], ok: false }) };
+            return { close: async () => {}, render: async () => testFailureDocument() };
           },
         }),
       /Invalid --course-dir/,
@@ -309,7 +313,7 @@ describe('question preview server startup', () => {
       argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
       createRuntime: async (options) => {
         events.push(`runtime:${options.courseDir}:${options.prewarmWorkers}`);
-        return { close: async () => {}, render: async () => ({ diagnostics: [], ok: false }) };
+        return { close: async () => {}, render: async () => testFailureDocument() };
       },
     });
     events.push('ready');
@@ -328,44 +332,6 @@ describe('question preview server startup', () => {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }
-  });
-
-  it('cleans stale generated-file temp roots on startup and removes the current root on close', async () => {
-    const courseDir = await makeTempCourse();
-    const first = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    const tempRootPrefix = path.basename(first.generatedFilesRoot).slice(0, -6);
-    await first.close();
-
-    const staleRoot = path.join(os.tmpdir(), `${tempRootPrefix}stale-test`);
-    await fs.mkdir(staleRoot, { recursive: true });
-    await fs.writeFile(path.join(staleRoot, 'leftover.txt'), 'stale generated file');
-
-    const second = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
-      }),
-    });
-
-    try {
-      assert.equal(await pathExists(staleRoot), false);
-      assert.equal(path.basename(second.generatedFilesRoot).startsWith(tempRootPrefix), true);
-      assert.equal(await pathExists(second.generatedFilesRoot), true);
-    } finally {
-      await second.close();
-      await fs.rm(staleRoot, { force: true, recursive: true });
-      await fs.rm(courseDir, { force: true, recursive: true });
-    }
-
-    assert.equal(await pathExists(second.generatedFilesRoot), false);
   });
 });
 
@@ -395,7 +361,7 @@ describe('question preview server asset routes', () => {
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
+        render: async () => testFailureDocument(),
       }),
     });
 
@@ -451,16 +417,10 @@ describe('question preview server asset routes', () => {
       createRuntime: async () => ({
         close: async () => {},
         render: async (input) => {
-          renderCalls.push(input.qid);
-          return {
-            diagnostics: [],
-            ok: true,
-            payload: {
-              bodyHtml: '<p>Preview fallback should not render for missing assets</p>',
-              headHtml: '',
-              variant: { seed: input.variantSeed ?? '1' },
-            },
-          };
+          renderCalls.push(input.qid.decoded);
+          return testSuccessDocument(
+            '<p>Preview fallback should not render for missing assets</p>',
+          );
         },
       }),
     });
@@ -546,7 +506,7 @@ describe('question preview server asset routes', () => {
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
+        render: async () => testFailureDocument(),
       }),
     });
 
@@ -589,7 +549,7 @@ describe('question preview server asset routes', () => {
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
-        render: async () => ({ diagnostics: [], ok: false }),
+        render: async () => testFailureDocument(),
       }),
     });
 
@@ -632,7 +592,7 @@ describe('question preview server asset routes', () => {
     }
   });
 
-  it('serves generated files through render ID-scoped URLs that keep older renders available', async () => {
+  it('serves generated files through local preview variant identity URLs that keep older identities available', async () => {
     const courseDir = await makeTempCourse();
     const qid = 'runtime/generated-file';
     await writeQuestionInfo(courseDir, qid, {
@@ -669,14 +629,14 @@ describe('question preview server asset routes', () => {
       const first = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
       const firstHtml = await first.text();
       const firstMatch = firstHtml.match(
-        /href="(?<path>\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/data\.txt)"/,
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/variant\/(?<variantId>[^/"?#]+)\/data\.txt)"/,
       );
 
       assert.equal(first.status, 200);
-      nodeAssert.doesNotMatch(firstHtml, /generatedFilesQuestion\/variant\/1/);
+      nodeAssert.doesNotMatch(firstHtml, /generatedFilesQuestion\/render\//);
       assert.isNotNull(firstMatch);
       const firstPath = firstMatch.groups?.path ?? '';
-      const firstRenderId = firstMatch.groups?.renderId ?? '';
+      const firstVariantId = firstMatch.groups?.variantId ?? '';
 
       const firstFile = await fetch(`${baseUrl}${firstPath}`);
       assert.equal(firstFile.status, 200);
@@ -688,14 +648,14 @@ describe('question preview server asset routes', () => {
       const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
       const secondHtml = await second.text();
       const secondMatch = secondHtml.match(
-        /href="(?<path>\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/data\.txt)"/,
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/variant\/(?<variantId>[^/"?#]+)\/data\.txt)"/,
       );
 
       assert.equal(second.status, 200);
       assert.isNotNull(secondMatch);
       const secondPath = secondMatch.groups?.path ?? '';
-      const secondRenderId = secondMatch.groups?.renderId ?? '';
-      assert.notEqual(firstRenderId, secondRenderId);
+      const secondVariantId = secondMatch.groups?.variantId ?? '';
+      assert.notEqual(firstVariantId, secondVariantId);
 
       const secondFile = await fetch(`${baseUrl}${secondPath}`);
       assert.equal(secondFile.status, 200);
@@ -710,9 +670,155 @@ describe('question preview server asset routes', () => {
     }
   });
 
-  it('rejects generated-file render ID mixing and invalid generated-file paths', async () => {
+  it('generates local preview files lazily from the stored prepared variant', async () => {
     const courseDir = await makeTempCourse();
-    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-server-outside-'));
+    const qid = 'runtime/lazy-generated-file';
+    await writeQuestionInfo(courseDir, qid, {
+      title: 'Lazy generated file',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111138',
+    });
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<pl-file-download file-name="data.txt" type="dynamic" force-download="false"></pl-file-download>',
+    );
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      [
+        'def generate(data):',
+        '    data["params"]["message"] = "prepared seed " + str(data["variant_seed"])',
+        '',
+        'def file(data):',
+        '    return "old file with " + data["params"]["message"]',
+        '',
+      ].join('\n'),
+    );
+
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const response = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
+      const html = await response.text();
+      const match = html.match(
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/variant\/[^/"?#]+\/data\.txt)"/,
+      );
+
+      assert.equal(response.status, 200);
+      assert.isNotNull(match);
+      const generatedFilePath = match.groups?.path ?? '';
+
+      await writeQuestionFile(
+        courseDir,
+        qid,
+        'server.py',
+        [
+          'def generate(data):',
+          '    data["params"]["message"] = "regenerated"',
+          '',
+          'def file(data):',
+          '    return "lazy file with " + data["params"]["message"]',
+          '',
+        ].join('\n'),
+      );
+
+      const generatedFile = await fetch(`${baseUrl}${generatedFilePath}`);
+
+      assert.equal(generatedFile.status, 200);
+      assert.equal(await generatedFile.text(), 'lazy file with prepared seed 1');
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns not found for evicted local preview variant identities and refreshes with fresh URLs', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'runtime/generated-file-eviction';
+    await writeQuestionInfo(courseDir, qid, {
+      title: 'Generated file eviction',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111139',
+    });
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<pl-file-download file-name="data.txt" type="dynamic" force-download="false"></pl-file-download>',
+    );
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      [
+        'def file(data):',
+        '    return "generated file for seed " + str(data["variant_seed"])',
+        '',
+      ].join('\n'),
+    );
+
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      localPreviewGeneratedFilesMax: 1,
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const first = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
+      const firstHtml = await first.text();
+      const firstMatch = firstHtml.match(
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/variant\/[^/"?#]+\/data\.txt)"/,
+      );
+      assert.equal(first.status, 200);
+      assert.isNotNull(firstMatch);
+      const firstPath = firstMatch.groups?.path ?? '';
+
+      const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
+      const secondHtml = await second.text();
+      const secondMatch = secondHtml.match(
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/variant\/[^/"?#]+\/data\.txt)"/,
+      );
+      assert.equal(second.status, 200);
+      assert.isNotNull(secondMatch);
+      const secondPath = secondMatch.groups?.path ?? '';
+      assert.notEqual(firstPath, secondPath);
+
+      const evictedFile = await fetch(`${baseUrl}${firstPath}`);
+      assert.equal(evictedFile.status, 404);
+
+      const retainedFile = await fetch(`${baseUrl}${secondPath}`);
+      assert.equal(retainedFile.status, 200);
+      assert.equal(await retainedFile.text(), 'generated file for seed 2');
+
+      const refresh = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
+      const refreshHtml = await refresh.text();
+      const refreshMatch = refreshHtml.match(
+        /href="(?<path>\/preview-render\/generatedFilesQuestion\/variant\/[^/"?#]+\/data\.txt)"/,
+      );
+      assert.equal(refresh.status, 200);
+      assert.isNotNull(refreshMatch);
+      const refreshPath = refreshMatch.groups?.path ?? '';
+      assert.notEqual(refreshPath, firstPath);
+
+      const refreshedFile = await fetch(`${baseUrl}${refreshPath}`);
+      assert.equal(refreshedFile.status, 200);
+      assert.equal(await refreshedFile.text(), 'generated file for seed 1');
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects unknown local preview variant identities and invalid generated-file paths', async () => {
+    const courseDir = await makeTempCourse();
     const qid = 'runtime/generated-file-isolation';
     await writeQuestionInfo(courseDir, qid, {
       title: 'Generated file isolation',
@@ -752,63 +858,45 @@ describe('question preview server asset routes', () => {
       const first = await fetch(`${baseUrl}/questions/${qid}?variant=1`);
       const firstHtml = await first.text();
       const firstMatch = firstHtml.match(
-        /href="\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/first\.txt"/,
+        /href="\/preview-render\/generatedFilesQuestion\/variant\/(?<variantId>[^/"?#]+)\/first\.txt"/,
       );
       assert.equal(first.status, 200);
       assert.isNotNull(firstMatch);
-      const firstRenderId = firstMatch.groups?.renderId ?? '';
-      await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'outside generated secret');
-      await fs.symlink(
-        path.join(outsideDir, 'secret.txt'),
-        path.join(started.generatedFilesRoot, firstRenderId, 'linked-secret.txt'),
-      );
+      const firstVariantId = firstMatch.groups?.variantId ?? '';
 
       const second = await fetch(`${baseUrl}/questions/${qid}?variant=2`);
       const secondHtml = await second.text();
       const secondMatch = secondHtml.match(
-        /href="\/preview-render\/generatedFilesQuestion\/render\/(?<renderId>[^/"?#]+)\/second\.txt"/,
+        /href="\/preview-render\/generatedFilesQuestion\/variant\/(?<variantId>[^/"?#]+)\/second\.txt"/,
       );
       assert.equal(second.status, 200);
       assert.isNotNull(secondMatch);
-      const secondRenderId = secondMatch.groups?.renderId ?? '';
-      assert.notEqual(firstRenderId, secondRenderId);
+      const secondVariantId = secondMatch.groups?.variantId ?? '';
+      assert.notEqual(firstVariantId, secondVariantId);
 
-      const mixedRenderId = await fetch(
-        `${baseUrl}/preview-render/generatedFilesQuestion/render/${secondRenderId}/first.txt`,
+      const unknownVariantId = await fetch(
+        `${baseUrl}/preview-render/generatedFilesQuestion/variant/999999/first.txt`,
       );
-      const mixedRenderIdBody = await mixedRenderId.text();
-      assert.notEqual(mixedRenderId.status, 200);
-      nodeAssert.doesNotMatch(mixedRenderIdBody, /generated first/);
+      const unknownVariantIdBody = await unknownVariantId.text();
+      assert.equal(unknownVariantId.status, 404);
+      nodeAssert.doesNotMatch(unknownVariantIdBody, /generated first/);
 
       const rejectedPaths = [
-        '/preview-render/generatedFilesQuestion/render/not-a-render-id/first.txt',
-        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/%2e%2e/${secondRenderId}/second.txt`,
-        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/%2Ftmp%2Fsecret.txt`,
-        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/dir%5Csecret.txt`,
-        `/preview-render/generatedFilesQuestion/render/${firstRenderId}//first.txt`,
+        `/preview-render/generatedFilesQuestion/variant/${firstVariantId}/%2e%2e/${secondVariantId}/second.txt`,
+        `/preview-render/generatedFilesQuestion/variant/${firstVariantId}/%2Ftmp%2Fsecret.txt`,
+        `/preview-render/generatedFilesQuestion/variant/${firstVariantId}/dir%5Csecret.txt`,
+        `/preview-render/generatedFilesQuestion/variant/${firstVariantId}//first.txt`,
       ];
 
       for (const rejectedPath of rejectedPaths) {
         const response = await requestRawPath(started, rejectedPath);
 
         assert.notEqual(response.status, 200, rejectedPath);
-        nodeAssert.doesNotMatch(
-          response.body,
-          /generated first|generated second|outside generated secret/,
-          rejectedPath,
-        );
+        nodeAssert.doesNotMatch(response.body, /generated first|generated second/, rejectedPath);
       }
-
-      const symlinkedGeneratedFile = await requestRawPath(
-        started,
-        `/preview-render/generatedFilesQuestion/render/${firstRenderId}/linked-secret.txt`,
-      );
-      assert.equal(symlinkedGeneratedFile.status, 200);
-      assert.match(symlinkedGeneratedFile.body, /outside generated secret/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
-      await fs.rm(outsideDir, { force: true, recursive: true });
     }
   });
 });
@@ -822,16 +910,11 @@ describe('question preview server direct preview route', () => {
       createRuntime: async () => ({
         close: async () => {},
         render: async (input) => {
-          renderCalls.push(input);
-          return {
-            diagnostics: [],
-            ok: true,
-            payload: {
-              bodyHtml: '<div class="question-container"><p>Rendered preview body</p></div>',
-              headHtml: '<script>window.previewHeadLoaded = true;</script>',
-              variant: { seed: input.variantSeed ?? '1' },
-            },
-          };
+          renderCalls.push({ qid: input.qid.decoded, variantSeed: input.variantSeed });
+          return testSuccessDocument(
+            '<div class="question-container"><p>Rendered preview body</p></div>',
+            '<script>window.previewHeadLoaded = true;</script>',
+          );
         },
       }),
     });
@@ -871,15 +954,8 @@ describe('question preview server direct preview route', () => {
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
-        render: async () => ({
-          diagnostics: [],
-          ok: true,
-          payload: {
-            bodyHtml: '<section><p>Only rendered question content</p></section>',
-            headHtml: '',
-            variant: { seed: '1' },
-          },
-        }),
+        render: async () =>
+          testSuccessDocument('<section><p>Only rendered question content</p></section>'),
       }),
     });
 
@@ -917,15 +993,7 @@ describe('question preview server direct preview route', () => {
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
-        render: async () => ({
-          diagnostics: [],
-          ok: true,
-          payload: {
-            bodyHtml: '<p>Preview only</p>',
-            headHtml: '',
-            variant: { seed: '1' },
-          },
-        }),
+        render: async () => testSuccessDocument('<p>Preview only</p>'),
       }),
     });
 
@@ -966,8 +1034,8 @@ describe('question preview server direct preview route', () => {
       argv: ['--course-dir', courseDir, '--port', '0'],
       createRuntime: async () => ({
         close: async () => {},
-        render: async () => ({
-          diagnostics: [
+        render: async () =>
+          testFailureDocument([
             {
               data: {
                 env: { SECRET_TOKEN: 'shh' },
@@ -981,9 +1049,7 @@ describe('question preview server direct preview route', () => {
               name: 'CourseIssueError',
               phase: 'generate',
             },
-          ],
-          ok: false,
-        }),
+          ]),
       }),
     });
 
@@ -1023,16 +1089,8 @@ describe('question preview server direct preview route', () => {
       createRuntime: async () => ({
         close: async () => {},
         render: async (input) => {
-          renderCalls.push(input.qid);
-          return {
-            diagnostics: [],
-            ok: true,
-            payload: {
-              bodyHtml: '<p>Permissive runtime rendered invalid qid</p>',
-              headHtml: '',
-              variant: { seed: input.variantSeed ?? '1' },
-            },
-          };
+          renderCalls.push(input.qid.decoded);
+          return testSuccessDocument('<p>Permissive runtime rendered invalid qid</p>');
         },
       }),
     });
@@ -1093,30 +1151,23 @@ describe('question preview server direct preview route', () => {
         return {
           close: async () => {},
           render: async (input) => {
-            renderCalls.push({ ...input, runtimeId });
+            renderCalls.push({
+              qid: input.qid.decoded,
+              runtimeId,
+              variantSeed: input.variantSeed,
+            });
             if (renderCalls.length === 1) {
-              return {
-                diagnostics: [
-                  {
-                    fatal: true,
-                    message: 'Unsupported question type from edited info.json',
-                    name: 'ExpectedPreviewFailure',
-                    phase: 'metadata',
-                  },
-                ],
-                ok: false,
-              };
+              return testFailureDocument([
+                {
+                  fatal: true,
+                  message: 'Unsupported question type from edited info.json',
+                  name: 'ExpectedPreviewFailure',
+                  phase: 'metadata',
+                },
+              ]);
             }
 
-            return {
-              diagnostics: [],
-              ok: true,
-              payload: {
-                bodyHtml: '<p>Rendered after expected failure</p>',
-                headHtml: '',
-                variant: { seed: input.variantSeed ?? '1' },
-              },
-            };
+            return testSuccessDocument('<p>Rendered after expected failure</p>');
           },
         };
       },
@@ -1164,20 +1215,12 @@ describe('question preview server direct preview route', () => {
           close: async () => {
             closedRuntimeIds.push(runtimeId);
           },
-          render: async (input) => {
+          render: async () => {
             if (runtimeId === 1) {
               throw new Error('preview runtime crashed');
             }
 
-            return {
-              diagnostics: [],
-              ok: true,
-              payload: {
-                bodyHtml: `<p>Recovered on runtime ${runtimeId}</p>`,
-                headHtml: '',
-                variant: { seed: input.variantSeed ?? '1' },
-              },
-            };
+            return testSuccessDocument(`<p>Recovered on runtime ${runtimeId}</p>`);
           },
         };
       },
