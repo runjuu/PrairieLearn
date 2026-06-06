@@ -1,8 +1,4 @@
-import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import type { IncomingMessage, Server } from 'node:http';
-import os from 'node:os';
-import path from 'node:path';
 
 import express, {
   type ErrorRequestHandler,
@@ -11,40 +7,42 @@ import express, {
   type Response,
 } from 'express';
 import asyncHandler from 'express-async-handler';
-import { z } from 'zod';
 
 import * as assets from './assets.js';
+import { createQuestionPreviewAssetResolver } from './question-preview-assets.js';
+import type { LocalPreviewGeneratedFiles } from './question-preview-generated-files.js';
 import {
-  type QuestionPreviewPayload,
-  type QuestionPreviewRuntime,
-  type QuestionPreviewRuntimeOptions,
-  type QuestionPreviewRuntimeRenderInput,
-  type QuestionPreviewRuntimeRenderOptions,
-  decodeSafeUrlPathSegments,
-  isPathInsideRoot,
-} from './question-preview-render.js';
+  type QuestionPreviewHttpAction,
+  type QuestionPreviewHttpResponse,
+  mapQuestionPreviewAssetFileResponse,
+  mapQuestionPreviewDocumentResponse,
+  mapQuestionPreviewGeneratedFileResponse,
+  mapQuestionPreviewInvalidQidResponse,
+  mapQuestionPreviewRouteErrorResponse,
+} from './question-preview-http-response.js';
+import { parseQuestionPreviewQid } from './question-preview-qid.js';
+import type { QuestionPreviewRuntime } from './question-preview-render.js';
 import {
+  type QuestionPreviewRuntimeFactory,
+  type QuestionPreviewRuntimeLifecycle,
+  createQuestionPreviewRuntimeLifecycle,
+} from './question-preview-runtime-lifecycle.js';
+import {
+  type QuestionPreviewServerHttpOptions,
   type QuestionPreviewServerOptions,
+  getQuestionPreviewServerHttpOptions,
+  getQuestionPreviewServerRuntimeOptions,
   parseQuestionPreviewServerOptions,
 } from './question-preview-server-options.js';
-
-const GENERATED_FILES_TEMP_PREFIX = 'pl-preview-server-generated-files-';
-const GENERATED_FILES_OWNER_FILE = '.owner.json';
-const activeGeneratedFilesRoots = new Set<string>();
 
 export { parseQuestionPreviewServerOptions, type QuestionPreviewServerOptions };
 
 export interface StartedQuestionPreviewServer {
   close(): Promise<void>;
-  generatedFilesRoot: string;
   options: QuestionPreviewServerOptions;
   runtime: QuestionPreviewRuntime;
   server: Server;
 }
-
-type QuestionPreviewRuntimeFactory = (
-  options: QuestionPreviewRuntimeOptions,
-) => Promise<QuestionPreviewRuntime>;
 
 /**
  * Resolves once the server returned by Express is accepting requests.
@@ -68,342 +66,6 @@ function waitForListening(server: Server) {
 }
 
 /**
- * Converts preview-server startup options into the runtime options required by
- * the question renderer.
- *
- * @param options - Validated preview-server options from CLI parsing.
- */
-function makeRuntimeOptions(options: QuestionPreviewServerOptions): QuestionPreviewRuntimeOptions {
-  return {
-    cacheType: options.cacheType,
-    courseDir: options.courseDir,
-    devMode: options.devMode,
-    prewarmWorkers: true,
-    questionTimeoutMilliseconds: options.questionTimeoutMilliseconds,
-    urlPrefix: '/preview-render',
-    workersCount: options.workersCount,
-    workersExecutionMode: options.workersExecutionMode,
-  };
-}
-
-/**
- * Checks whether a process ID appears to still belong to a live process.
- *
- * @param pid - Process ID read from a generated-files owner record.
- */
-function processIsAlive(pid: number) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (err instanceof Error && 'code' in err && err.code === 'ESRCH') return false;
-    return true;
-  }
-}
-
-/**
- * Reads the owner PID for a generated-files root, returning `null` when the
- * owner file is missing or malformed.
- *
- * @param root - Temporary generated-files directory to inspect.
- */
-async function generatedFilesRootOwnerPid(root: string) {
-  try {
-    const owner = JSON.parse(
-      await fs.readFile(path.join(root, GENERATED_FILES_OWNER_FILE), 'utf8'),
-    ) as unknown;
-    if (typeof owner !== 'object' || owner == null || Array.isArray(owner)) return null;
-    const pid = (owner as Record<string, unknown>).pid;
-    return typeof pid === 'number' ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Removes generated-files temp directories whose owning preview server is no
- * longer running.
- */
-async function cleanupStaleGeneratedFilesRoots() {
-  let entries: { isDirectory(): boolean; name: string }[];
-  try {
-    entries = await fs.readdir(os.tmpdir(), { withFileTypes: true });
-  } catch {
-    return;
-  }
-
-  await Promise.all(
-    entries.map(async (entry) => {
-      if (!entry.isDirectory() || !entry.name.startsWith(GENERATED_FILES_TEMP_PREFIX)) return;
-
-      const root = path.join(os.tmpdir(), entry.name);
-      if (activeGeneratedFilesRoots.has(root)) return;
-
-      const ownerPid = await generatedFilesRootOwnerPid(root);
-      if (ownerPid != null && ownerPid !== process.pid && processIsAlive(ownerPid)) return;
-
-      await fs.rm(root, { force: true, recursive: true }).catch(() => {});
-    }),
-  );
-}
-
-/**
- * Creates the root directory used to store files generated by preview renders.
- */
-async function createGeneratedFilesRoot() {
-  await cleanupStaleGeneratedFilesRoots();
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), GENERATED_FILES_TEMP_PREFIX));
-  activeGeneratedFilesRoots.add(root);
-  await fs.writeFile(
-    path.join(root, GENERATED_FILES_OWNER_FILE),
-    JSON.stringify({ createdAt: new Date().toISOString(), pid: process.pid }),
-  );
-  return root;
-}
-
-/**
- * Removes a generated-files root owned by this preview-server instance.
- *
- * @param root - Temporary generated-files directory to delete.
- */
-async function removeGeneratedFilesRoot(root: string) {
-  activeGeneratedFilesRoots.delete(root);
-  await fs.rm(root, { force: true, recursive: true }).catch(() => {});
-}
-
-/**
- * Wraps a preview runtime so infrastructure failures discard the current
- * runtime and allow a later request to create a fresh one.
- */
-class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntime {
-  private currentRuntime: QuestionPreviewRuntime | null;
-  private nextRuntimePromise: Promise<QuestionPreviewRuntime> | null = null;
-
-  /**
-   * @param initialRuntime - Runtime created during preview-server startup.
-   * @param createRuntime - Factory used to create replacement runtimes.
-   * @param runtimeOptions - Options passed to `createRuntime` for replacements.
-   */
-  constructor(
-    initialRuntime: QuestionPreviewRuntime,
-    private readonly createRuntime: QuestionPreviewRuntimeFactory,
-    private readonly runtimeOptions: QuestionPreviewRuntimeOptions,
-  ) {
-    this.currentRuntime = initialRuntime;
-  }
-
-  /**
-   * Returns the current runtime, creating a replacement if a previous request
-   * discarded it after a failure.
-   */
-  private async getRuntime() {
-    if (this.currentRuntime != null) return this.currentRuntime;
-
-    this.nextRuntimePromise ??= this.createRuntime(this.runtimeOptions).finally(() => {
-      this.nextRuntimePromise = null;
-    });
-    this.currentRuntime = await this.nextRuntimePromise;
-    return this.currentRuntime;
-  }
-
-  /**
-   * Marks a failed runtime as unusable and closes it.
-   *
-   * @param runtime - The runtime instance that failed during rendering.
-   */
-  private async discardRuntime(runtime: QuestionPreviewRuntime) {
-    if (this.currentRuntime !== runtime) return;
-    this.currentRuntime = null;
-
-    try {
-      await runtime.close();
-    } catch {
-      // The runtime has already failed. A close failure should not prevent
-      // the request from reporting the original infrastructure failure.
-    }
-  }
-
-  /**
-   * Renders through the active runtime and discards that runtime if rendering
-   * fails at the infrastructure layer.
-   *
-   * @param input - Question and variant information for the render.
-   * @param options - Optional render settings, including generated-file output.
-   */
-  async render(
-    input: QuestionPreviewRuntimeRenderInput,
-    options?: QuestionPreviewRuntimeRenderOptions,
-  ) {
-    const runtime = await this.getRuntime();
-
-    try {
-      return await runtime.render(input, options);
-    } catch (err) {
-      await this.discardRuntime(runtime);
-      throw err;
-    }
-  }
-
-  /**
-   * Closes the current or pending runtime during preview-server shutdown.
-   */
-  async close() {
-    const pendingRuntime = this.nextRuntimePromise;
-    if (pendingRuntime != null) {
-      await pendingRuntime.catch(() => null);
-    }
-
-    const runtime = this.currentRuntime;
-    this.currentRuntime = null;
-    await runtime?.close();
-  }
-}
-
-/**
- * Resolves a file below a root while rejecting traversal, missing files, and
- * directories.
- *
- * @param rootInput - Directory that bounds the allowed file lookup.
- * @param pathSegments - Already-decoded path segments relative to `rootInput`.
- */
-async function resolveBoundedFile(rootInput: string, pathSegments: string[]) {
-  const root = path.resolve(rootInput);
-  const filePath = path.resolve(root, ...pathSegments);
-  if (!isPathInsideRoot(root, filePath)) return null;
-  if (!(await fs.stat(root)).isDirectory()) return null;
-  if (!(await fs.stat(filePath)).isFile()) return null;
-
-  return filePath;
-}
-
-/**
- * Searches multiple bounded roots for the first existing safe file.
- *
- * @param roots - Candidate root directories to search in order.
- * @param pathSegments - Already-decoded path segments relative to each root.
- */
-async function resolveBoundedFileFromRoots(roots: string[], pathSegments: string[]) {
-  for (const root of roots) {
-    try {
-      const filePath = await resolveBoundedFile(root, pathSegments);
-      if (filePath !== null) return filePath;
-    } catch (err) {
-      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') continue;
-      throw err;
-    }
-  }
-
-  return null;
-}
-
-interface BoundedAssetRequest {
-  roots: string[];
-  segments: string[];
-}
-
-const GENERATED_FILES_ROUTE_PREFIX = '/preview-render/generatedFilesQuestion/render/';
-const GENERATED_FILES_ROUTE_PATTERN = `${GENERATED_FILES_ROUTE_PREFIX}*`;
-const GeneratedFilesRenderIdSchema = z.string().uuid();
-
-/**
- * Converts a generated-files URL into a bounded file lookup request.
- *
- * @param generatedFilesRoot - Temp root that contains render-ID directories.
- * @param pathname - Raw request pathname without query string.
- */
-function generatedFilesAssetRequestFromPathname(
-  generatedFilesRoot: string,
-  pathname: string,
-): BoundedAssetRequest | null {
-  const segments = decodeSafeUrlPathSegments(pathname.slice(GENERATED_FILES_ROUTE_PREFIX.length));
-  if (segments == null || segments.length < 2) return null;
-
-  const [renderId, ...fileSegments] = segments;
-  if (!GeneratedFilesRenderIdSchema.safeParse(renderId).success) return null;
-
-  return {
-    roots: [path.join(generatedFilesRoot, renderId)],
-    segments: fileSegments,
-  };
-}
-
-/**
- * Converts a startup-course asset URL into a bounded file lookup request.
- *
- * @param courseDir - Course directory supplied at preview-server startup.
- * @param pathname - Raw request pathname without query string.
- */
-function startupCourseAssetRequestFromPathname(
-  courseDir: string,
-  pathname: string,
-): BoundedAssetRequest | null {
-  const startupCourseAssetRoutes = [
-    {
-      prefix: '/preview-render/clientFilesCourse/',
-      roots: [path.join(courseDir, 'clientFilesCourse')],
-      stripCachebuster: false,
-    },
-    {
-      prefix: '/preview-render/elements/',
-      roots: [path.join(courseDir, 'elements')],
-      stripCachebuster: false,
-    },
-    {
-      prefix: '/preview-render/cacheableElements/',
-      roots: [path.join(courseDir, 'elements')],
-      stripCachebuster: true,
-    },
-    {
-      prefix: '/preview-render/elementExtensions/',
-      roots: [path.join(courseDir, 'elementExtensions')],
-      stripCachebuster: false,
-    },
-    {
-      prefix: '/preview-render/cacheableElementExtensions/',
-      roots: [path.join(courseDir, 'elementExtensions')],
-      stripCachebuster: true,
-    },
-  ];
-
-  for (const route of startupCourseAssetRoutes) {
-    if (!pathname.startsWith(route.prefix)) continue;
-
-    const segments = decodeSafeUrlPathSegments(pathname.slice(route.prefix.length));
-    if (segments == null) return null;
-
-    const fileSegments = route.stripCachebuster ? segments.slice(1) : segments;
-    if (fileSegments.length === 0) return null;
-
-    return {
-      roots: route.roots,
-      segments: fileSegments,
-    };
-  }
-
-  const questionFilesPrefix = '/preview-render/questions/';
-  if (pathname.startsWith(questionFilesPrefix)) {
-    const segments = decodeSafeUrlPathSegments(pathname.slice(questionFilesPrefix.length));
-    if (segments == null) return null;
-
-    const filesSegmentIndex = segments.lastIndexOf('files');
-    if (filesSegmentIndex <= 0 || filesSegmentIndex === segments.length - 1) return null;
-
-    const qidSegments = segments.slice(0, filesSegmentIndex);
-    const fileSegments = segments.slice(filesSegmentIndex + 1);
-
-    return {
-      roots: [path.join(courseDir, 'questions', ...qidSegments, 'clientFilesQuestion')],
-      segments: fileSegments,
-    };
-  }
-
-  return null;
-}
-
-/**
  * Reads the URL pathname exactly as sent by the client, before Express decodes
  * wildcard route parameters.
  *
@@ -415,74 +77,74 @@ function rawRequestPathname(req: IncomingMessage) {
   return queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
 }
 
-/**
- * Extracts a valid HTTP status code from framework errors.
- *
- * @param err - Unknown error thrown while handling a request.
- */
-function errorStatusCode(err: unknown) {
-  if (typeof err !== 'object' || err == null || Array.isArray(err)) return null;
-  const status = (err as Record<string, unknown>).status;
-  return Number.isInteger(status) && (status as number) >= 400 && (status as number) < 600
-    ? (status as number)
-    : null;
+async function sendQuestionPreviewHttpResponse(
+  res: Response,
+  response: QuestionPreviewHttpResponse,
+) {
+  switch (response.kind) {
+    case 'attachment':
+      res.status(response.status).attachment(response.filename).send(response.data);
+      return;
+    case 'empty':
+      res.status(response.status).end();
+      return;
+    case 'file':
+      await new Promise<void>((resolve, reject) => {
+        res
+          .status(response.status)
+          .sendFile(response.filePath, { headers: response.headers }, (err?: Error) => {
+            if (err == null) {
+              resolve();
+            } else {
+              reject(err);
+            }
+          });
+      });
+      return;
+    case 'html':
+      res.status(response.status).type('html').send(response.html);
+      return;
+  }
 }
 
-/**
- * Sends a bounded asset response or a 404 when the requested file is invalid or
- * missing.
- *
- * @param res - Express response used for `sendFile`.
- * @param assetRequest - Safe root and path-segment lookup request, or `null`.
- */
-async function handleBoundedAssetRequest(res: Response, assetRequest: BoundedAssetRequest | null) {
-  if (assetRequest == null) {
-    res.status(404).end();
+async function sendQuestionPreviewHttpAction(res: Response, action: QuestionPreviewHttpAction) {
+  for (const log of action.logs) {
+    console.error(log.message, log.details);
+  }
+
+  await sendQuestionPreviewHttpResponse(res, action.response);
+}
+
+type QuestionPreviewAssetResolver = ReturnType<typeof createQuestionPreviewAssetResolver>;
+
+async function handleQuestionPreviewAssetRequest(
+  res: Response,
+  assetResolver: QuestionPreviewAssetResolver,
+  pathname: string,
+) {
+  const generatedFileResult = await assetResolver.resolveGeneratedFile(pathname);
+  if (generatedFileResult != null) {
+    await sendQuestionPreviewHttpAction(
+      res,
+      mapQuestionPreviewGeneratedFileResponse(generatedFileResult),
+    );
     return;
   }
 
-  const filePath = await resolveBoundedFileFromRoots(assetRequest.roots, assetRequest.segments);
-  if (filePath == null) {
-    res.status(404).end();
-    return;
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    res.sendFile(filePath, { headers: { 'cache-control': 'no-store' } }, (err?: Error) => {
-      if (err == null) {
-        resolve();
-      } else {
-        reject(err);
-      }
-    });
-  });
+  const filePath = await assetResolver.resolve(pathname);
+  await sendQuestionPreviewHttpAction(res, mapQuestionPreviewAssetFileResponse(filePath));
 }
 
-const STARTUP_COURSE_ASSET_ROUTE_PATTERNS = [
-  '/preview-render/clientFilesCourse/*',
-  '/preview-render/elements/*',
-  '/preview-render/cacheableElements/*',
-  '/preview-render/elementExtensions/*',
-  '/preview-render/cacheableElementExtensions/*',
-  '/preview-render/questions/*',
-];
-
-/**
- * Registers Express routes for startup-course assets.
- *
- * @param app - Express application receiving the routes.
- * @param options - Preview-server options, including `courseDir`.
- */
-function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreviewServerOptions) {
-  for (const routePattern of STARTUP_COURSE_ASSET_ROUTE_PATTERNS) {
+function registerQuestionPreviewAssetRoutes(
+  app: Express,
+  assetResolver: QuestionPreviewAssetResolver,
+) {
+  for (const routePattern of assetResolver.routePatterns) {
     app
       .route(routePattern)
       .get(
         asyncHandler(async (req, res) => {
-          await handleBoundedAssetRequest(
-            res,
-            startupCourseAssetRequestFromPathname(options.courseDir, rawRequestPathname(req)),
-          );
+          await handleQuestionPreviewAssetRequest(res, assetResolver, rawRequestPathname(req));
         }),
       )
       .all((_req, res) => {
@@ -491,78 +153,7 @@ function registerStartupCourseAssetRoutes(app: Express, options: QuestionPreview
   }
 }
 
-/**
- * Registers Express routes for generated preview files.
- *
- * @param app - Express application receiving the routes.
- * @param generatedFilesRoot - Temp root containing render-ID directories.
- */
-function registerGeneratedFilesAssetRoutes(app: Express, generatedFilesRoot: string) {
-  app
-    .route(GENERATED_FILES_ROUTE_PATTERN)
-    .get(
-      asyncHandler(async (req, res) => {
-        await handleBoundedAssetRequest(
-          res,
-          generatedFilesAssetRequestFromPathname(generatedFilesRoot, rawRequestPathname(req)),
-        );
-      }),
-    )
-    .all((_req, res) => {
-      res.status(405).end();
-    });
-}
-
-type PreviewDocumentContent = Pick<QuestionPreviewPayload, 'bodyHtml' | 'headHtml'>;
-
-/**
- * Wraps preview document fragments in a full HTML document for the browser.
- *
- * @param content - HTML fragments to render in the document head and body.
- */
-function renderPreviewDocument(content: PreviewDocumentContent) {
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-${content.headHtml}
-</head>
-<body>
-${content.bodyHtml}
-</body>
-</html>`;
-}
-
-const PREVIEW_ERROR_DOCUMENT = renderPreviewDocument({
-  bodyHtml: `<main>
-<h1>Question preview failed</h1>
-<p>Check the preview server console for details.</p>
-</main>`,
-  headHtml: '<title>Question Preview Error</title>',
-});
-
-/**
- * Checks whether a qid would escape or confuse the course question namespace.
- *
- * @param qid - Decoded question ID from the request path.
- */
-function invalidQuestionPreviewQid(qid: string) {
-  const segments = qid.split('/');
-
-  return (
-    qid.length === 0 ||
-    qid.startsWith('/') ||
-    qid.includes('\\') ||
-    qid.includes('\0') ||
-    path.isAbsolute(qid) ||
-    segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
-  );
-}
-
 interface HandleQuestionPreviewRequestParams {
-  generatedFilesRoot: string;
-  options: QuestionPreviewServerOptions;
   qid: string;
   req: Request;
   res: Response;
@@ -573,40 +164,25 @@ interface HandleQuestionPreviewRequestParams {
  * Handles direct question preview URLs and renders the requested question.
  */
 async function handleQuestionPreviewRequest({
-  generatedFilesRoot,
-  options,
   qid,
   req,
   res,
   runtime,
 }: HandleQuestionPreviewRequestParams) {
-  if (invalidQuestionPreviewQid(qid)) {
-    res.status(422).type('html').send(PREVIEW_ERROR_DOCUMENT);
+  const qidResult = parseQuestionPreviewQid(qid);
+  if (!qidResult.ok) {
+    await sendQuestionPreviewHttpAction(res, mapQuestionPreviewInvalidQidResponse());
     return;
   }
 
-  const renderId = crypto.randomUUID();
-  const url = new URL(req.url, `http://${options.host}:${options.port}`);
+  const url = new URL(req.url, 'http://question-preview.local');
 
-  const result = await runtime.render(
-    {
-      qid,
-      variantSeed: url.searchParams.get('variant') ?? undefined,
-    },
-    {
-      generatedFiles: {
-        renderId,
-        root: generatedFilesRoot,
-      },
-    },
-  );
+  const result = await runtime.render({
+    qid: qidResult.qid,
+    variantSeed: url.searchParams.get('variant') ?? undefined,
+  });
 
-  if (result.ok) {
-    res.status(200).type('html').send(renderPreviewDocument(result.payload));
-  } else {
-    console.error('Question preview render failed:', result.diagnostics);
-    res.status(422).type('html').send(PREVIEW_ERROR_DOCUMENT);
-  }
+  await sendQuestionPreviewHttpAction(res, mapQuestionPreviewDocumentResponse(result));
 }
 
 /**
@@ -619,21 +195,15 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
       return;
     }
 
-    const status = errorStatusCode(err);
-    if (status != null && status < 500) {
-      res.status(status).end();
-      return;
-    }
-
-    console.error('Question preview request failed:', err);
-    res.status(500).type('html').send(PREVIEW_ERROR_DOCUMENT);
+    void sendQuestionPreviewHttpAction(res, mapQuestionPreviewRouteErrorResponse(err)).catch(next);
   };
 }
 
 interface CreateQuestionPreviewAppParams {
-  generatedFilesRoot: string;
-  options: QuestionPreviewServerOptions;
+  httpOptions: QuestionPreviewServerHttpOptions;
+  localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   runtime: QuestionPreviewRuntime;
+  urlPrefix: string;
 }
 
 /**
@@ -641,11 +211,18 @@ interface CreateQuestionPreviewAppParams {
  * assets, and generated files.
  */
 function createQuestionPreviewApp({
-  generatedFilesRoot,
-  options,
+  httpOptions,
+  localPreviewGeneratedFiles,
   runtime,
+  urlPrefix,
 }: CreateQuestionPreviewAppParams) {
   const app = express();
+  const assetResolver = createQuestionPreviewAssetResolver({
+    courseDir: httpOptions.courseDir,
+    localPreviewGeneratedFiles,
+    urlPrefix,
+  });
+
   app.disable('x-powered-by');
   app.enable('strict routing');
 
@@ -666,12 +243,11 @@ function createQuestionPreviewApp({
         return;
       }
 
-      await handleQuestionPreviewRequest({ generatedFilesRoot, options, qid, req, res, runtime });
+      await handleQuestionPreviewRequest({ qid, req, res, runtime });
     }),
   );
 
-  registerStartupCourseAssetRoutes(app, options);
-  registerGeneratedFilesAssetRoutes(app, generatedFilesRoot);
+  registerQuestionPreviewAssetRoutes(app, assetResolver);
 
   app.use((_req, res) => {
     res.status(404).end();
@@ -685,6 +261,7 @@ function createQuestionPreviewApp({
 interface StartQuestionPreviewServerParams {
   argv: string[];
   createRuntime: QuestionPreviewRuntimeFactory;
+  localPreviewGeneratedFilesMax?: number;
 }
 
 /**
@@ -694,27 +271,29 @@ interface StartQuestionPreviewServerParams {
 export async function startQuestionPreviewServer({
   argv,
   createRuntime,
+  localPreviewGeneratedFilesMax,
 }: StartQuestionPreviewServerParams): Promise<StartedQuestionPreviewServer> {
   const options = await parseQuestionPreviewServerOptions(argv);
-  const generatedFilesRoot = await createGeneratedFilesRoot();
-  const runtimeOptions = makeRuntimeOptions(options);
-  let runtime: ReplaceableQuestionPreviewRuntime | null = null;
+  const httpOptions = getQuestionPreviewServerHttpOptions(options);
+  const runtimeOptions = getQuestionPreviewServerRuntimeOptions(options);
+  let runtime: QuestionPreviewRuntimeLifecycle | null = null;
   let server: Server | null = null;
 
   try {
-    runtime = new ReplaceableQuestionPreviewRuntime(
-      await createRuntime(runtimeOptions),
+    runtime = await createQuestionPreviewRuntimeLifecycle({
       createRuntime,
+      localPreviewGeneratedFilesMax,
       runtimeOptions,
-    );
+    });
 
     await assets.init();
 
     server = createQuestionPreviewApp({
-      generatedFilesRoot,
-      options,
+      httpOptions,
+      localPreviewGeneratedFiles: runtime.localPreviewGeneratedFiles,
       runtime,
-    }).listen(options.port, options.host);
+      urlPrefix: runtime.urlPrefix,
+    }).listen(httpOptions.port, httpOptions.host);
     await waitForListening(server);
   } catch (err) {
     await runtime?.close().catch(() => {});
@@ -725,7 +304,6 @@ export async function startQuestionPreviewServer({
       await new Promise<void>((resolve) => failedServer.close(() => resolve()));
     }
 
-    await removeGeneratedFilesRoot(generatedFilesRoot);
     throw err;
   }
 
@@ -747,13 +325,10 @@ export async function startQuestionPreviewServer({
         closeError ??= err;
       }
 
-      await removeGeneratedFilesRoot(generatedFilesRoot);
-
       if (closeError != null) {
         throw closeError as Error;
       }
     },
-    generatedFilesRoot,
     options,
     runtime,
     server,
