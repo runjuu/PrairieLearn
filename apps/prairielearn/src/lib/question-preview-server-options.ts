@@ -8,12 +8,11 @@ import {
   type QuestionPreviewCacheType,
   type QuestionPreviewWorkersExecutionMode,
 } from './question-preview-render.js';
+import type { QuestionPreviewRuntimeLifecycleStartupOptions } from './question-preview-runtime-lifecycle.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4310;
 const DEFAULT_QUESTION_TIMEOUT_MS = 5000;
-const DEFAULT_RENDER_TIMEOUT_MS = 10000;
-const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
 
 const SUPPORTED_FLAGS = new Set([
   '_',
@@ -23,28 +22,31 @@ const SUPPORTED_FLAGS = new Set([
   'host',
   'port',
   'question-timeout-ms',
-  'render-timeout-ms',
-  'startup-timeout-ms',
   'workers-count',
   'workers-execution-mode',
 ]);
 
-export interface QuestionPreviewServerOptions {
+export interface QuestionPreviewServerHttpOptions {
+  courseDir: string;
+  host: string;
+  port: number;
+}
+
+export interface QuestionPreviewServerRuntimeOptions extends QuestionPreviewRuntimeLifecycleStartupOptions {
   cacheType: QuestionPreviewCacheType;
   courseDir: string;
   devMode: boolean;
-  host: string;
-  port: number;
   questionTimeoutMilliseconds: number;
-  renderTimeoutMilliseconds: number;
-  startupTimeoutMilliseconds: number;
   workersCount: number;
   workersExecutionMode: QuestionPreviewWorkersExecutionMode;
 }
 
+export interface QuestionPreviewServerOptions
+  extends QuestionPreviewServerHttpOptions, QuestionPreviewServerRuntimeOptions {}
+
 function addIssue(ctx: z.RefinementCtx, message: string): never {
   ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-  return z.NEVER as never;
+  return z.NEVER;
 }
 
 function singleStringFlagSchema(flagName: string) {
@@ -142,12 +144,6 @@ const QuestionPreviewServerOptionsSchema = z.object({
     (value, ctx) =>
       parsePositiveInteger(value, 'question-timeout-ms', DEFAULT_QUESTION_TIMEOUT_MS, ctx),
   ),
-  renderTimeoutMilliseconds: singleStringFlagSchema('render-timeout-ms').transform((value, ctx) =>
-    parsePositiveInteger(value, 'render-timeout-ms', DEFAULT_RENDER_TIMEOUT_MS, ctx),
-  ),
-  startupTimeoutMilliseconds: singleStringFlagSchema('startup-timeout-ms').transform((value, ctx) =>
-    parsePositiveInteger(value, 'startup-timeout-ms', DEFAULT_STARTUP_TIMEOUT_MS, ctx),
-  ),
   workersCount: singleStringFlagSchema('workers-count').transform((value, ctx) =>
     parsePositiveInteger(value, 'workers-count', 1, ctx),
   ),
@@ -178,8 +174,6 @@ export async function parseQuestionPreviewServerOptions(
       'host',
       'port',
       'question-timeout-ms',
-      'render-timeout-ms',
-      'startup-timeout-ms',
       'workers-count',
       'workers-execution-mode',
     ],
@@ -201,8 +195,6 @@ export async function parseQuestionPreviewServerOptions(
     host: argv.host,
     port: argv.port,
     questionTimeoutMilliseconds: argv['question-timeout-ms'],
-    renderTimeoutMilliseconds: argv['render-timeout-ms'],
-    startupTimeoutMilliseconds: argv['startup-timeout-ms'],
     workersCount: argv['workers-count'],
     workersExecutionMode: argv['workers-execution-mode'],
   });
@@ -213,4 +205,27 @@ export async function parseQuestionPreviewServerOptions(
 
   await assertValidCourseDir(parsed.data.courseDir);
   return parsed.data;
+}
+
+export function getQuestionPreviewServerHttpOptions(
+  options: QuestionPreviewServerOptions,
+): QuestionPreviewServerHttpOptions {
+  return {
+    courseDir: options.courseDir,
+    host: options.host,
+    port: options.port,
+  };
+}
+
+export function getQuestionPreviewServerRuntimeOptions(
+  options: QuestionPreviewServerOptions,
+): QuestionPreviewServerRuntimeOptions {
+  return {
+    cacheType: options.cacheType,
+    courseDir: options.courseDir,
+    devMode: options.devMode,
+    questionTimeoutMilliseconds: options.questionTimeoutMilliseconds,
+    workersCount: options.workersCount,
+    workersExecutionMode: options.workersExecutionMode,
+  };
 }
