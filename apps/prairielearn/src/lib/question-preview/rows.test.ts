@@ -39,8 +39,8 @@ describe('local preview rows', () => {
     assert.equal(course.path, '/course');
     assert.equal(course.short_name, 'preview-render');
     assert.deepEqual(caller, {
-      effectiveUserId: null,
       groupId: null,
+      userId: null,
       variantCourse: { id: course.id },
     });
     assert.equal(question.id, '1');
