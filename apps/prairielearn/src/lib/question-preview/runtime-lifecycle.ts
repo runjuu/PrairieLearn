@@ -4,6 +4,7 @@ import type {
   QuestionPreviewCacheType,
   QuestionPreviewRuntime,
   QuestionPreviewRuntimeStartupOptions,
+  QuestionPreviewStartupLogger,
   QuestionPreviewWorkersExecutionMode,
 } from './render.js';
 
@@ -19,6 +20,7 @@ export interface QuestionPreviewRuntimeLifecycleStartupOptions {
   devMode?: boolean;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
+  startupLogger?: QuestionPreviewStartupLogger;
   workersCount?: number;
   workersExecutionMode?: QuestionPreviewWorkersExecutionMode;
 }

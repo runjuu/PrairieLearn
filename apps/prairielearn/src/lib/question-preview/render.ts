@@ -22,6 +22,7 @@ const DEFAULT_PREVIEW_URL_PREFIX = '/preview-render';
 
 export type QuestionPreviewWorkersExecutionMode = 'native' | 'container';
 export type QuestionPreviewCacheType = 'memory' | 'none' | 'redis';
+export type QuestionPreviewStartupLogger = (message: string) => void;
 
 export interface QuestionPreviewRuntimeStartupOptions {
   cacheType?: QuestionPreviewCacheType;
@@ -30,6 +31,7 @@ export interface QuestionPreviewRuntimeStartupOptions {
   localPreviewGeneratedFiles?: LocalPreviewGeneratedFiles;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
+  startupLogger?: QuestionPreviewStartupLogger;
   urlPrefix?: string;
   workersCount?: number;
   workersExecutionMode?: QuestionPreviewWorkersExecutionMode;
@@ -62,6 +64,7 @@ async function initPrairieLearnForQuestionPreview({
   mode,
   prewarmWorkers = false,
   questionTimeoutMilliseconds = 5000,
+  startupLogger,
   workersCount = 1,
 }: {
   cacheType?: QuestionPreviewCacheType;
@@ -69,6 +72,7 @@ async function initPrairieLearnForQuestionPreview({
   mode: QuestionPreviewWorkersExecutionMode;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
+  startupLogger?: QuestionPreviewStartupLogger;
   workersCount?: number;
 }) {
   validateQuestionPreviewWorkersExecutionMode(mode);
@@ -82,14 +86,27 @@ async function initPrairieLearnForQuestionPreview({
   config.workersCount = workersCount;
   config.workersExecutionMode = mode;
 
+  startupLogger?.(`Initializing preview cache (${cacheType}).`);
   await cache.init({
     keyPrefix: config.cacheKeyPrefix,
     redisUrl: config.redisUrl,
     type: config.cacheType,
   });
+
+  startupLogger?.('Loading PrairieLearn assets.');
   await assets.init();
+
+  startupLogger?.('Loading PrairieLearn elements.');
   await freeformServer.init();
+
+  startupLogger?.(
+    prewarmWorkers
+      ? `Starting ${workersCount} Python worker${workersCount === 1 ? '' : 's'} (${mode} mode).`
+      : `Preparing Python worker pool (${mode} mode, workers start on first request).`,
+  );
   await codeCaller.init({ lazyWorkers: !prewarmWorkers });
+
+  startupLogger?.('PrairieLearn runtime initialized.');
 }
 
 async function closePrairieLearnForQuestionPreview() {
@@ -130,6 +147,7 @@ export async function createQuestionPreviewRuntime({
   localPreviewGeneratedFiles,
   prewarmWorkers = false,
   questionTimeoutMilliseconds = 5000,
+  startupLogger,
   urlPrefix = DEFAULT_PREVIEW_URL_PREFIX,
   workersCount = 1,
   workersExecutionMode = 'native',
@@ -141,8 +159,11 @@ export async function createQuestionPreviewRuntime({
     mode: workersExecutionMode,
     prewarmWorkers,
     questionTimeoutMilliseconds,
+    startupLogger,
     workersCount,
   });
+
+  startupLogger?.('Preparing question preview renderer.');
   const runtimeLocalPreviewGeneratedFiles =
     localPreviewGeneratedFiles ?? new LocalPreviewGeneratedFiles({ urlPrefix });
   const documentRenderer = createQuestionPreviewDocumentRenderer({
@@ -150,6 +171,7 @@ export async function createQuestionPreviewRuntime({
     localPreviewGeneratedFiles: runtimeLocalPreviewGeneratedFiles,
     urlPrefix,
   });
+  startupLogger?.('Question preview renderer initialized.');
 
   return new InitializedQuestionPreviewRuntime(documentRenderer);
 }
@@ -176,6 +198,7 @@ export async function renderQuestionPreview(
     devMode: input.devMode,
     prewarmWorkers: input.prewarmWorkers,
     questionTimeoutMilliseconds: input.questionTimeoutMilliseconds,
+    startupLogger: input.startupLogger,
     urlPrefix: input.urlPrefix,
     workersCount: input.workersCount,
     workersExecutionMode: input.workersExecutionMode,
