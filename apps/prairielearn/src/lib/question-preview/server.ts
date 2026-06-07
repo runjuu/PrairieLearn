@@ -22,7 +22,7 @@ import {
   mapQuestionPreviewRouteErrorResponse,
 } from './http-response.js';
 import { parseQuestionPreviewQid } from './qid.js';
-import type { QuestionPreviewRuntime } from './render.js';
+import type { QuestionPreviewRuntime, QuestionPreviewStartupLogger } from './render.js';
 import {
   type QuestionPreviewRuntimeFactory,
   type QuestionPreviewRuntimeLifecycle,
@@ -263,6 +263,7 @@ interface StartQuestionPreviewServerParams {
   argv: string[];
   createRuntime: QuestionPreviewRuntimeFactory;
   localPreviewGeneratedFilesMax?: number;
+  startupLogger?: QuestionPreviewStartupLogger;
 }
 
 /**
@@ -273,22 +274,29 @@ export async function startQuestionPreviewServer({
   argv,
   createRuntime,
   localPreviewGeneratedFilesMax,
+  startupLogger,
 }: StartQuestionPreviewServerParams): Promise<StartedQuestionPreviewServer> {
+  startupLogger?.('Reading preview server options.');
   const options = await parseQuestionPreviewServerOptions(argv);
+  startupLogger?.(`Validated course directory: ${options.courseDir}.`);
+
   const httpOptions = getQuestionPreviewServerHttpOptions(options);
   const runtimeOptions = getQuestionPreviewServerRuntimeOptions(options);
   let runtime: QuestionPreviewRuntimeLifecycle | null = null;
   let server: Server | null = null;
 
   try {
+    startupLogger?.('Initializing preview runtime.');
     runtime = await createQuestionPreviewRuntimeLifecycle({
       createRuntime,
       localPreviewGeneratedFilesMax,
-      runtimeOptions,
+      runtimeOptions: startupLogger == null ? runtimeOptions : { ...runtimeOptions, startupLogger },
     });
 
+    startupLogger?.('Preparing preview asset routes.');
     await assets.init();
 
+    startupLogger?.(`Starting HTTP server on ${httpOptions.host}:${httpOptions.port}.`);
     server = createQuestionPreviewApp({
       httpOptions,
       localPreviewGeneratedFiles: runtime.localPreviewGeneratedFiles,
