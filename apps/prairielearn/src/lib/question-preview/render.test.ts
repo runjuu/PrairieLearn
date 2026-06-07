@@ -48,16 +48,19 @@ describe('question preview renderer', () => {
       uuid: '11111111-1111-4111-8111-111111111111',
     });
     await writeQuestionFile(courseDir, 'demo/preview', 'question.html', '<p>Rendered preview</p>');
+    const startupLogs: string[] = [];
 
     try {
       const result = await renderQuestionPreview({
         courseDir,
         qid: 'demo/preview',
+        startupLogger: (message) => startupLogs.push(message),
         urlPrefix: '/preview',
         variantSeed: '123',
       });
 
       assert.equal(result.ok, true);
+      assert.include(startupLogs, 'Preparing question preview renderer.');
       assert.deepEqual(Object.keys(result).sort(), ['diagnostics', 'documentHtml', 'ok']);
       assert.match(result.documentHtml, /^<!doctype html>/i);
       assert.match(result.documentHtml, /document\.urlPrefix = '\/preview'/);
