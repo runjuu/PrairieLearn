@@ -330,6 +330,36 @@ describe('question preview server startup', () => {
       await fs.rm(courseDir, { force: true, recursive: true });
     }
   });
+
+  it('reports startup progress when a startup logger is provided', async () => {
+    const courseDir = await makeTempCourse();
+    const logs: string[] = [];
+    const startupLogger = (message: string) => logs.push(message);
+    const runtimeOptions: Parameters<StartQuestionPreviewServerParams['createRuntime']>[0][] = [];
+
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
+      createRuntime: async (options) => {
+        runtimeOptions.push(options);
+        return { close: async () => {}, render: async () => testFailureDocument() };
+      },
+      startupLogger,
+    });
+
+    try {
+      assert.equal(runtimeOptions[0]?.startupLogger, startupLogger);
+      assert.deepEqual(logs, [
+        'Reading preview server options.',
+        `Validated course directory: ${path.resolve(courseDir)}.`,
+        'Initializing preview runtime.',
+        'Preparing preview asset routes.',
+        'Starting HTTP server on 127.0.0.1:0.',
+      ]);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
 });
 
 describe('question preview server asset routes', () => {
