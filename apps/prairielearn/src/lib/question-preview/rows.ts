@@ -78,8 +78,8 @@ function makeLocalPreviewCourse(courseDir: string): Course {
 
 function makeLocalPreviewQuestionCaller(course: Course): QuestionCaller {
   return {
-    effectiveUserId: null,
     groupId: null,
+    userId: null,
     variantCourse: { id: course.id },
   };
 }
