@@ -165,7 +165,7 @@ describe('question preview server startup', () => {
         port: 4310,
         questionTimeoutMilliseconds: 5000,
         workersCount: 1,
-        workersExecutionMode: 'native',
+        workersExecutionMode: 'container',
       });
 
       const explicitOptions = await parseQuestionPreviewServerOptions([
@@ -183,7 +183,7 @@ describe('question preview server startup', () => {
         '--workers-count',
         '4',
         '--workers-execution-mode',
-        'container',
+        'native',
       ]);
 
       assert.deepEqual(explicitOptions, {
@@ -194,7 +194,7 @@ describe('question preview server startup', () => {
         port: 0,
         questionTimeoutMilliseconds: 1,
         workersCount: 4,
-        workersExecutionMode: 'container',
+        workersExecutionMode: 'native',
       });
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -490,7 +490,7 @@ describe('question preview server asset routes', () => {
     );
 
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
     });
 
     try {
@@ -648,7 +648,7 @@ describe('question preview server asset routes', () => {
     );
 
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
     });
 
     try {
@@ -727,7 +727,7 @@ describe('question preview server asset routes', () => {
     );
 
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
     });
 
     try {
@@ -793,7 +793,7 @@ describe('question preview server asset routes', () => {
     );
 
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
       localPreviewGeneratedFilesMax: 1,
     });
 
@@ -877,7 +877,7 @@ describe('question preview server asset routes', () => {
     );
 
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
     });
 
     try {
@@ -1144,7 +1144,7 @@ describe('question preview server direct preview route', () => {
   it('rejects invalid qid path forms with generic error pages', async () => {
     const courseDir = await makeTempCourse();
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
     });
 
     try {
@@ -1284,7 +1284,7 @@ describe('question preview server direct preview route', () => {
     const courseDir = await makeTempCourse();
     await writeQuestion(courseDir, 'runtime/simple');
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--port', '0'],
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
     });
 
     try {
@@ -1339,7 +1339,16 @@ describe('question preview server direct preview route', () => {
 
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const started = await startTestQuestionPreviewServer({
-      argv: ['--course-dir', courseDir, '--cache-type', 'memory', '--port', '0'],
+      argv: [
+        '--course-dir',
+        courseDir,
+        '--cache-type',
+        'memory',
+        '--port',
+        '0',
+        '--workers-execution-mode',
+        'native',
+      ],
     });
 
     try {

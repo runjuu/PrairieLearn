@@ -108,7 +108,7 @@ function parseWorkersExecutionMode(
   value: string | undefined,
   ctx: z.RefinementCtx,
 ): QuestionPreviewWorkersExecutionMode {
-  const mode = value ?? 'native';
+  const mode = value ?? 'container';
   if (mode !== 'native' && mode !== 'container') {
     return addIssue(
       ctx,

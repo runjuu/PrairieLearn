@@ -36,11 +36,13 @@ Optional flags:
 - `--question-timeout-ms`: Question-code worker timeout in milliseconds. Defaults to `5000`.
 - `--workers-count`: Maximum number of question-code workers. Defaults to `1`.
 - `--workers-execution-mode`: Worker execution mode, either `native` or `container`. Defaults to
-  `native`.
+  `container`.
 
-With the defaults shown above, the local server runs question code in native worker mode. Rendering
-may execute question `server.py` under the developer account, and question code has the developer
-account's normal outbound network access.
+With the default `container` mode, the local server runs question code inside a Docker container, so
+Docker must be installed and running. The container isolates question code from your machine's
+filesystem and processes, but does not currently restrict its outbound network access. Pass
+`--workers-execution-mode native` to run question code directly on your machine instead, where
+question `server.py` runs under your user account with its normal outbound network access.
 
 This is distinct from production Quesal preview: the local server does not implement Quesal
 authorization, Source Course Reference resolution, Temporary Preview Course materialization,
