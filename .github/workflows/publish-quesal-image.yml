@@ -1,0 +1,74 @@
+name: Publish Quesal image
+
+# Builds the root Dockerfile (the full PrairieLearn image, which includes the
+# question preview server at apps/prairielearn/dist/preview-server.js) and
+# publishes it to GHCR. Triggered on every push to the dedicated `quesal-image`
+# branch, or manually via the Actions tab.
+
+on:
+  push:
+    branches:
+      - quesal-image
+  workflow_dispatch:
+
+concurrency:
+  group: publish-quesal-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # Resolves to ghcr.io/runjuu/prairielearn (owner is already lowercase).
+  IMAGE_NAME: ${{ github.repository_owner }}/prairielearn
+
+jobs:
+  build-and-push:
+    name: Build and push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # The PrairieLearn image is large; reclaim space preinstalled on the
+      # runner that we don't need so the build doesn't run out of disk.
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=ref,event=branch
+            type=sha,format=short
+            type=sha,format=long
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
