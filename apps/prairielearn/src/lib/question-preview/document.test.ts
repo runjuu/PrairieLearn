@@ -52,6 +52,7 @@ async function withInitializedDocumentRenderer<T>(
     courseDir,
     localPreviewGeneratedFiles,
     urlPrefix: '/preview',
+    workersExecutionMode: 'native',
   });
   const renderer = createQuestionPreviewDocumentRenderer({
     courseDir,
