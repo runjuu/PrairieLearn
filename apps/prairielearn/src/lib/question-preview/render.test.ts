@@ -57,6 +57,7 @@ describe('question preview renderer', () => {
         startupLogger: (message) => startupLogs.push(message),
         urlPrefix: '/preview',
         variantSeed: '123',
+        workersExecutionMode: 'native',
       });
 
       assert.equal(result.ok, true);

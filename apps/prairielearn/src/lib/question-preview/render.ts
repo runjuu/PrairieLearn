@@ -150,7 +150,7 @@ export async function createQuestionPreviewRuntime({
   startupLogger,
   urlPrefix = DEFAULT_PREVIEW_URL_PREFIX,
   workersCount = 1,
-  workersExecutionMode = 'native',
+  workersExecutionMode = 'container',
 }: QuestionPreviewRuntimeStartupOptions): Promise<QuestionPreviewRuntime> {
   validateQuestionPreviewWorkersExecutionMode(workersExecutionMode);
   await initPrairieLearnForQuestionPreview({
