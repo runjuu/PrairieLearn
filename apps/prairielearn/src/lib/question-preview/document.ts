@@ -103,7 +103,7 @@ function makePreviewLocals({
     questionUrl: `${urlPrefix}/question/${questionId}/`,
     showCorrectAnswer: false,
     urlPrefix,
-    workspaceUrl: undefined,
+    workspaceUrl: '#',
   };
 }
 
