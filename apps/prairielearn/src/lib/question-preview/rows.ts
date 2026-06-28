@@ -132,7 +132,7 @@ function makeLocalPreviewQuestion(qid: QuestionPreviewQid, info: QuestionJson): 
     workspace_home: workspaceOptions.home ?? null,
     workspace_image: workspaceOptions.image ?? null,
     workspace_port: workspaceOptions.port ?? null,
-    workspace_url_rewrite: workspaceOptions.rewriteUrl,
+    workspace_url_rewrite: workspaceOptions.rewriteUrl ?? null,
   };
 }
 
