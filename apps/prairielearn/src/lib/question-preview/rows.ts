@@ -1,6 +1,6 @@
 import type { QuestionCaller } from '../../question-servers/types.js';
 import { type QuestionJson, defaultWorkspaceOptions } from '../../schemas/index.js';
-import type { Course, Question, Variant } from '../db-types.js';
+import type { Course, Question, Submission, Variant } from '../db-types.js';
 
 import type { QuestionPreviewQid } from './qid.js';
 
@@ -8,6 +8,7 @@ const PREVIEW_COURSE_ID = '1';
 const PREVIEW_QUESTION_ID = '1';
 const PREVIEW_USER_ID = '1';
 const DEFAULT_PREVIEW_VARIANT_ID = '1';
+const DEFAULT_PREVIEW_SUBMISSION_ID = '1';
 
 export interface LocalPreviewQuestionRows {
   caller: QuestionCaller;
@@ -27,6 +28,20 @@ interface LocalPreviewVariantData {
   params: Record<string, unknown>;
   preferences: Record<string, string | number | boolean>;
   true_answer: Record<string, unknown>;
+}
+
+interface LocalPreviewSubmissionData {
+  broken: boolean;
+  feedback: Record<string, unknown> | null;
+  format_errors: Record<string, unknown> | null;
+  gradable: boolean | null;
+  params: Record<string, unknown> | null;
+  partial_scores: Record<string, unknown> | null;
+  raw_submitted_answer: Record<string, unknown> | null;
+  score: number | null;
+  submitted_answer: Record<string, unknown> | null;
+  true_answer: Record<string, unknown> | null;
+  v2_score?: number | null;
 }
 
 function normalizeExternalEntrypoint(entrypoint: string | string[] | undefined): string | null {
@@ -184,5 +199,43 @@ export function makeLocalPreviewVariant(
     user_id: PREVIEW_USER_ID,
     variant_seed: variantSeed,
     workspace_id: null,
+  };
+}
+
+export function makeLocalPreviewSubmission(
+  variant: Variant,
+  data: LocalPreviewSubmissionData,
+  { id = DEFAULT_PREVIEW_SUBMISSION_ID }: { id?: string } = {},
+): Submission {
+  const now = new Date();
+
+  return {
+    auth_user_id: PREVIEW_USER_ID,
+    broken: data.broken,
+    client_fingerprint_id: null,
+    correct: data.score == null ? null : data.score >= 1,
+    credit: null,
+    date: now,
+    duration: null,
+    feedback: data.feedback,
+    format_errors: data.format_errors,
+    gradable: data.gradable,
+    graded_at: data.score == null ? null : now,
+    grading_requested_at: null,
+    id,
+    is_ai_graded: false,
+    manual_rubric_grading_id: null,
+    mode: null,
+    modified_at: now,
+    override_score: null,
+    params: data.params,
+    partial_scores: data.partial_scores,
+    raw_submitted_answer: data.raw_submitted_answer,
+    regradable: false,
+    score: data.score,
+    submitted_answer: data.submitted_answer,
+    true_answer: data.true_answer,
+    v2_score: data.v2_score ?? null,
+    variant_id: variant.id,
   };
 }
