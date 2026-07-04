@@ -1,4 +1,4 @@
-import { html, unsafeHtml, type HtmlSafeString } from '@prairielearn/html';
+import { type HtmlSafeString, html, unsafeHtml } from '@prairielearn/html';
 
 import { assetPath, compiledScriptTag, nodeModulesAssetPath } from '../lib/assets.js';
 import type { Question } from '../lib/db-types.js';

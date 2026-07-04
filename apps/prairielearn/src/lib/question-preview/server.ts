@@ -62,7 +62,7 @@ import {
 import { makePreviewWorkspaceProxy } from './workspace-proxy.js';
 import type { PreviewWorkspaceEntry } from './workspace-registry.js';
 
-export { parseQuestionPreviewServerOptions, type QuestionPreviewServerOptions };
+export { parseQuestionPreviewServerOptions };
 
 type PreviewWorkspaceManagerFactory = (
   options: PreviewWorkspaceManagerOptions,

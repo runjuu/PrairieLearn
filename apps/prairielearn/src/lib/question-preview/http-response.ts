@@ -34,7 +34,7 @@ export type QuestionPreviewHttpResponse =
       status: 303;
     };
 
-export interface QuestionPreviewHttpLogEntry {
+interface QuestionPreviewHttpLogEntry {
   details: unknown;
   message: string;
 }

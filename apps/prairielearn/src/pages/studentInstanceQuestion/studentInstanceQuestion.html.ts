@@ -6,10 +6,7 @@ import {
   RegenerateInstanceModal,
 } from '../../components/AssessmentRegenerate.js';
 import { AssessmentScorePanel } from '../../components/AssessmentScorePanel.js';
-import {
-  CalculatorDrawer,
-  CalculatorDrawerToggle,
-} from '../../components/CalculatorDrawer.js';
+import { CalculatorDrawer, CalculatorDrawerToggle } from '../../components/CalculatorDrawer.js';
 import { InstructorInfoPanel } from '../../components/InstructorInfoPanel.js';
 import { PageLayout } from '../../components/PageLayout.js';
 import { PersonalNotesPanel } from '../../components/PersonalNotesPanel.js';

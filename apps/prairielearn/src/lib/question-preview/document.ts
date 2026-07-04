@@ -28,7 +28,7 @@ import {
 } from './rows.js';
 import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
-export interface QuestionPreviewSubmissionInput {
+interface QuestionPreviewSubmissionInput {
   /** Posted form fields with `__action`/`__csrf_token`/`__variant_id` already stripped. */
   rawSubmittedAnswer: Record<string, unknown>;
 }
@@ -55,7 +55,7 @@ export interface QuestionPreviewDocumentRendererOptions {
   urlPrefix: string;
 }
 
-export type QuestionPreviewPhase =
+type QuestionPreviewPhase =
   | 'input'
   | 'metadata'
   | 'generate'
@@ -73,7 +73,7 @@ export interface QuestionPreviewDiagnostic {
   stack?: string;
 }
 
-export interface QuestionPreviewDocumentSuccess {
+interface QuestionPreviewDocumentSuccess {
   diagnostics: QuestionPreviewDiagnostic[];
   documentHtml: string;
   ok: true;
