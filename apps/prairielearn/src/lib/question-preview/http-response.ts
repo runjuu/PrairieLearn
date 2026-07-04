@@ -22,6 +22,16 @@ export type QuestionPreviewHttpResponse =
       html: string;
       kind: 'html';
       status: number;
+    }
+  | {
+      body: unknown;
+      kind: 'json';
+      status: number;
+    }
+  | {
+      kind: 'redirect';
+      location: string;
+      status: 303;
     };
 
 export interface QuestionPreviewHttpLogEntry {
@@ -143,6 +153,41 @@ export function mapQuestionPreviewAssetFileResponse(
     kind: 'file',
     status: 200,
   });
+}
+
+export function mapQuestionPreviewWorkspacePageResponse({
+  html,
+  status,
+}: {
+  html: string;
+  status: 200 | 404;
+}): QuestionPreviewHttpAction {
+  return action({ html, kind: 'html', status });
+}
+
+export function mapQuestionPreviewWorkspaceStatusResponse(
+  statusJson: unknown,
+): QuestionPreviewHttpAction {
+  if (statusJson == null) {
+    return action({ kind: 'empty', status: 404 });
+  }
+
+  return action({ body: statusJson, kind: 'json', status: 200 });
+}
+
+export function mapQuestionPreviewWorkspaceActionResponse(
+  input: { kind: 'invalid-action'; action: unknown } | { kind: 'redirect'; location: string },
+): QuestionPreviewHttpAction {
+  if (input.kind === 'invalid-action') {
+    return action({ kind: 'empty', status: 400 }, [
+      {
+        details: { action: input.action },
+        message: 'Workspace action rejected: expected __action to be "reboot" or "reset".',
+      },
+    ]);
+  }
+
+  return action({ kind: 'redirect', location: input.location, status: 303 });
 }
 
 export function mapQuestionPreviewRouteErrorResponse(err: unknown): QuestionPreviewHttpAction {

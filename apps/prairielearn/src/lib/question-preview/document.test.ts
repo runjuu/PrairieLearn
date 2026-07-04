@@ -11,6 +11,9 @@ import {
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 import { createQuestionPreviewRuntime } from './render.js';
+import type { PreviewWorkspaceGradedFilesResult } from './workspace-files.js';
+import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
+import { LocalPreviewWorkspaces, type PreviewWorkspaceSpec } from './workspace-registry.js';
 
 async function makeTempCourse() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-document-'));
@@ -73,6 +76,9 @@ function assertGenericFailureDocument(documentHtml: string) {
 async function withInitializedDocumentRenderer<T>(
   courseDir: string,
   callback: (renderer: QuestionPreviewDocumentRenderer) => Promise<T>,
+  {
+    localPreviewWorkspaces = null,
+  }: { localPreviewWorkspaces?: PreviewWorkspaceAllocator | null } = {},
 ) {
   const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' });
   const runtime = await createQuestionPreviewRuntime({
@@ -84,6 +90,7 @@ async function withInitializedDocumentRenderer<T>(
   const renderer = createQuestionPreviewDocumentRenderer({
     courseDir,
     localPreviewGeneratedFiles,
+    localPreviewWorkspaces,
     urlPrefix: '/preview',
   });
 
@@ -92,6 +99,59 @@ async function withInitializedDocumentRenderer<T>(
   } finally {
     await runtime.close();
   }
+}
+
+async function writeWorkspaceQuestion(courseDir: string, qid: string, uuid: string) {
+  await writeQuestionInfo(courseDir, qid, {
+    title: 'Workspace question',
+    topic: 'Testing',
+    type: 'v3',
+    uuid,
+    workspaceOptions: {
+      gradedFiles: ['starter.py'],
+      home: '/home/user',
+      image: 'workspace-image',
+      port: 8080,
+    },
+  });
+  await writeQuestionFile(
+    courseDir,
+    qid,
+    'question.html',
+    '<pl-workspace></pl-workspace><pl-number-input answers-name="ans"></pl-number-input>',
+  );
+  await writeQuestionFile(
+    courseDir,
+    qid,
+    'server.py',
+    'def generate(data):\n    data["correct_answers"]["ans"] = 2\n',
+  );
+}
+
+interface FakeWorkspaceAllocator extends PreviewWorkspaceAllocator {
+  collectCalls: { qid: string; variantSeed: string }[];
+  ensureCalls: PreviewWorkspaceSpec[];
+}
+
+function makeFakeWorkspaceAllocator(
+  gradedFilesResult: PreviewWorkspaceGradedFilesResult = { files: [], ok: true },
+): FakeWorkspaceAllocator {
+  const workspaces = new LocalPreviewWorkspaces();
+  const collectCalls: { qid: string; variantSeed: string }[] = [];
+  const ensureCalls: PreviewWorkspaceSpec[] = [];
+
+  return {
+    collectCalls,
+    async collectGradedFiles(input) {
+      collectCalls.push(input);
+      return gradedFilesResult;
+    },
+    ensureCalls,
+    ensureWorkspace(spec) {
+      ensureCalls.push(spec);
+      return workspaces.ensureWorkspace(spec);
+    },
+  };
 }
 
 describe('question preview document', () => {
@@ -413,6 +473,178 @@ describe('question preview document', () => {
         assert.equal(refreshed.ok, true);
         assert.notMatch(refreshed.documentHtml, /submission-block/);
       });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('allocates a workspace and injects its URL for workspace questions', async () => {
+    const courseDir = await makeTempCourse();
+    await writeWorkspaceQuestion(
+      courseDir,
+      'demo/workspace',
+      '11111111-1111-4111-8111-111111111121',
+    );
+    const localPreviewWorkspaces = makeFakeWorkspaceAllocator();
+
+    try {
+      await withInitializedDocumentRenderer(
+        courseDir,
+        async (renderer) => {
+          const result = await renderer.render({
+            qid: parsePreviewQid('demo/workspace'),
+            variantSeed: '7',
+          });
+
+          assert.equal(result.ok, true);
+          assert.deepEqual(result.diagnostics, []);
+          assert.match(result.documentHtml, /href="\/workspace\/1"/);
+          assert.match(result.documentHtml, /data-workspace-id="1"/);
+
+          assert.lengthOf(localPreviewWorkspaces.ensureCalls, 1);
+          const spec = localPreviewWorkspaces.ensureCalls[0];
+          assert.equal(spec.qid, 'demo/workspace');
+          assert.equal(spec.variantSeed, '7');
+          assert.deepEqual(spec.settings, {
+            args: null,
+            enableNetworking: false,
+            environment: {},
+            gradedFiles: ['starter.py'],
+            home: '/home/user',
+            image: 'workspace-image',
+            port: 8080,
+            rewriteUrl: true,
+          });
+          assert.deepEqual(spec.params._workspace_required_file_names, ['starter.py']);
+          assert.deepEqual(spec.params._required_file_names, ['starter.py']);
+        },
+        { localPreviewWorkspaces },
+      );
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('renders a placeholder workspace link when workspaces are unavailable', async () => {
+    const courseDir = await makeTempCourse();
+    await writeWorkspaceQuestion(
+      courseDir,
+      'demo/workspace',
+      '11111111-1111-4111-8111-111111111122',
+    );
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('demo/workspace'),
+          variantSeed: '1',
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(result.diagnostics, []);
+        assert.match(result.documentHtml, /href="#"/);
+        assert.match(result.documentHtml, /data-workspace-id=""/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('injects workspace graded files into graded submissions', async () => {
+    const courseDir = await makeTempCourse();
+    await writeWorkspaceQuestion(
+      courseDir,
+      'demo/workspace',
+      '11111111-1111-4111-8111-111111111123',
+    );
+    const localPreviewWorkspaces = makeFakeWorkspaceAllocator({
+      files: [{ contents: Buffer.from('answer = 2').toString('base64'), name: 'starter.py' }],
+      ok: true,
+    });
+
+    try {
+      await withInitializedDocumentRenderer(
+        courseDir,
+        async (renderer) => {
+          const result = await renderer.render({
+            qid: parsePreviewQid('demo/workspace'),
+            variantSeed: '1',
+            submission: { rawSubmittedAnswer: { ans: '2' } },
+          });
+
+          assert.equal(result.ok, true);
+          assert.deepEqual(result.diagnostics, []);
+          assert.match(result.documentHtml, /data-testid="submission-block"/);
+          assert.match(result.documentHtml, /text-bg-success/);
+          assert.match(result.documentHtml, /100%/);
+          assert.deepEqual(localPreviewWorkspaces.collectCalls, [
+            { qid: 'demo/workspace', variantSeed: '1' },
+          ]);
+        },
+        { localPreviewWorkspaces },
+      );
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('marks submissions not gradable when workspace graded files are missing', async () => {
+    const courseDir = await makeTempCourse();
+    await writeWorkspaceQuestion(
+      courseDir,
+      'demo/workspace',
+      '11111111-1111-4111-8111-111111111124',
+    );
+    const localPreviewWorkspaces = makeFakeWorkspaceAllocator({ files: [], ok: true });
+
+    try {
+      await withInitializedDocumentRenderer(
+        courseDir,
+        async (renderer) => {
+          const result = await renderer.render({
+            qid: parsePreviewQid('demo/workspace'),
+            variantSeed: '1',
+            submission: { rawSubmittedAnswer: { ans: '2' } },
+          });
+
+          assert.equal(result.ok, true);
+          assert.match(result.documentHtml, /invalid, not gradable/);
+          assert.notMatch(result.documentHtml, /text-bg-success/);
+        },
+        { localPreviewWorkspaces },
+      );
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('turns workspace graded-file failures into submission format errors', async () => {
+    const courseDir = await makeTempCourse();
+    await writeWorkspaceQuestion(
+      courseDir,
+      'demo/workspace',
+      '11111111-1111-4111-8111-111111111125',
+    );
+    const localPreviewWorkspaces = makeFakeWorkspaceAllocator({
+      formatError: 'Cannot submit more than 100 files from the workspace.',
+      ok: false,
+    });
+
+    try {
+      await withInitializedDocumentRenderer(
+        courseDir,
+        async (renderer) => {
+          const result = await renderer.render({
+            qid: parsePreviewQid('demo/workspace'),
+            variantSeed: '1',
+            submission: { rawSubmittedAnswer: { ans: '2' } },
+          });
+
+          assert.equal(result.ok, true);
+          assert.match(result.documentHtml, /invalid, not gradable/);
+        },
+        { localPreviewWorkspaces },
+      );
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
     }

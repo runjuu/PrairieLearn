@@ -9,10 +9,14 @@ import {
   type QuestionPreviewWorkersExecutionMode,
 } from './render.js';
 import type { QuestionPreviewRuntimeLifecycleStartupOptions } from './runtime-lifecycle.js';
+import type { PreviewWorkspacePullPolicy } from './workspace-launcher.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4310;
 const DEFAULT_QUESTION_TIMEOUT_MS = 5000;
+const DEFAULT_WORKSPACE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_WORKSPACE_MAX_CONTAINERS = 3;
+const DEFAULT_WORKSPACE_START_TIMEOUT_MS = 60 * 1000;
 
 const SUPPORTED_FLAGS = new Set([
   '_',
@@ -24,6 +28,12 @@ const SUPPORTED_FLAGS = new Set([
   'question-timeout-ms',
   'workers-count',
   'workers-execution-mode',
+  'workspace-home-dir',
+  'workspace-idle-timeout-ms',
+  'workspace-max-containers',
+  'workspace-pull-policy',
+  'workspace-start-timeout-ms',
+  'workspaces',
 ]);
 
 export interface QuestionPreviewServerHttpOptions {
@@ -41,11 +51,23 @@ export interface QuestionPreviewServerRuntimeOptions extends QuestionPreviewRunt
   workersExecutionMode: QuestionPreviewWorkersExecutionMode;
 }
 
+export interface QuestionPreviewServerWorkspaceOptions {
+  workspaceHomeDir: string | undefined;
+  workspaceIdleTimeoutMs: number;
+  workspaceMaxContainers: number;
+  workspacePullPolicy: PreviewWorkspacePullPolicy;
+  workspaceStartTimeoutMs: number;
+  workspacesEnabled: boolean;
+}
+
 export interface QuestionPreviewServerOptions
-  extends QuestionPreviewServerHttpOptions, QuestionPreviewServerRuntimeOptions {}
+  extends
+    QuestionPreviewServerHttpOptions,
+    QuestionPreviewServerRuntimeOptions,
+    QuestionPreviewServerWorkspaceOptions {}
 
 function addIssue(ctx: z.RefinementCtx, message: string): never {
-  ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  ctx.addIssue({ code: 'custom', message });
   return z.NEVER;
 }
 
@@ -131,6 +153,21 @@ function parseCacheType(value: string | undefined, ctx: z.RefinementCtx): Questi
   return cacheType;
 }
 
+function parseWorkspacePullPolicy(
+  value: string | undefined,
+  ctx: z.RefinementCtx,
+): PreviewWorkspacePullPolicy {
+  const pullPolicy = value ?? 'missing';
+  if (pullPolicy !== 'missing' && pullPolicy !== 'always' && pullPolicy !== 'never') {
+    return addIssue(
+      ctx,
+      `Invalid --workspace-pull-policy "${pullPolicy}". Expected "missing", "always", or "never".`,
+    );
+  }
+
+  return pullPolicy;
+}
+
 const QuestionPreviewServerOptionsSchema = z.object({
   cacheType: singleStringFlagSchema('cache-type').transform(parseCacheType),
   courseDir: requiredSingleStringFlagSchema(
@@ -149,6 +186,39 @@ const QuestionPreviewServerOptionsSchema = z.object({
   ),
   workersExecutionMode:
     singleStringFlagSchema('workers-execution-mode').transform(parseWorkersExecutionMode),
+  workspaceHomeDir: singleStringFlagSchema('workspace-home-dir').transform((workspaceHomeDir) =>
+    workspaceHomeDir == null ? undefined : path.resolve(workspaceHomeDir),
+  ),
+  workspaceIdleTimeoutMs: singleStringFlagSchema('workspace-idle-timeout-ms').transform(
+    (value, ctx) =>
+      parsePositiveInteger(
+        value,
+        'workspace-idle-timeout-ms',
+        DEFAULT_WORKSPACE_IDLE_TIMEOUT_MS,
+        ctx,
+      ),
+  ),
+  workspaceMaxContainers: singleStringFlagSchema('workspace-max-containers').transform(
+    (value, ctx) =>
+      parsePositiveInteger(
+        value,
+        'workspace-max-containers',
+        DEFAULT_WORKSPACE_MAX_CONTAINERS,
+        ctx,
+      ),
+  ),
+  workspacePullPolicy:
+    singleStringFlagSchema('workspace-pull-policy').transform(parseWorkspacePullPolicy),
+  workspaceStartTimeoutMs: singleStringFlagSchema('workspace-start-timeout-ms').transform(
+    (value, ctx) =>
+      parsePositiveInteger(
+        value,
+        'workspace-start-timeout-ms',
+        DEFAULT_WORKSPACE_START_TIMEOUT_MS,
+        ctx,
+      ),
+  ),
+  workspacesEnabled: z.boolean(),
 });
 
 async function assertValidCourseDir(courseDir: string) {
@@ -167,7 +237,8 @@ export async function parseQuestionPreviewServerOptions(
   argvInput: string[],
 ): Promise<QuestionPreviewServerOptions> {
   const argv = minimist(argvInput, {
-    boolean: ['dev-mode'],
+    boolean: ['dev-mode', 'workspaces'],
+    default: { workspaces: true },
     string: [
       'cache-type',
       'course-dir',
@@ -176,6 +247,11 @@ export async function parseQuestionPreviewServerOptions(
       'question-timeout-ms',
       'workers-count',
       'workers-execution-mode',
+      'workspace-home-dir',
+      'workspace-idle-timeout-ms',
+      'workspace-max-containers',
+      'workspace-pull-policy',
+      'workspace-start-timeout-ms',
     ],
   });
 
@@ -197,6 +273,12 @@ export async function parseQuestionPreviewServerOptions(
     questionTimeoutMilliseconds: argv['question-timeout-ms'],
     workersCount: argv['workers-count'],
     workersExecutionMode: argv['workers-execution-mode'],
+    workspaceHomeDir: argv['workspace-home-dir'],
+    workspaceIdleTimeoutMs: argv['workspace-idle-timeout-ms'],
+    workspaceMaxContainers: argv['workspace-max-containers'],
+    workspacePullPolicy: argv['workspace-pull-policy'],
+    workspaceStartTimeoutMs: argv['workspace-start-timeout-ms'],
+    workspacesEnabled: argv.workspaces,
   });
 
   if (!parsed.success) {
@@ -227,5 +309,18 @@ export function getQuestionPreviewServerRuntimeOptions(
     questionTimeoutMilliseconds: options.questionTimeoutMilliseconds,
     workersCount: options.workersCount,
     workersExecutionMode: options.workersExecutionMode,
+  };
+}
+
+export function getQuestionPreviewServerWorkspaceOptions(
+  options: QuestionPreviewServerOptions,
+): QuestionPreviewServerWorkspaceOptions {
+  return {
+    workspaceHomeDir: options.workspaceHomeDir,
+    workspaceIdleTimeoutMs: options.workspaceIdleTimeoutMs,
+    workspaceMaxContainers: options.workspaceMaxContainers,
+    workspacePullPolicy: options.workspacePullPolicy,
+    workspaceStartTimeoutMs: options.workspaceStartTimeoutMs,
+    workspacesEnabled: options.workspacesEnabled,
   };
 }

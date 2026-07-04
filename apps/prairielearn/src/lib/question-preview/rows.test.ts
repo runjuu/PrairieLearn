@@ -7,6 +7,7 @@ import {
   makeLocalPreviewQuestionRows,
   makeLocalPreviewSubmission,
   makeLocalPreviewVariant,
+  makePreviewWorkspaceSettings,
 } from './rows.js';
 
 function parseQid(qid: string) {
@@ -55,6 +56,44 @@ describe('local preview rows', () => {
     assert.equal(question.partial_credit, false);
     assert.equal(question.external_grading_entrypoint, 'python3 grade.py');
     assert.equal(question.workspace_args, '--port 8080');
+  });
+
+  it('derives workspace settings from question metadata', () => {
+    const info = QuestionJsonSchema.parse({
+      title: 'Workspace settings question',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111151',
+      workspaceOptions: {
+        args: ['--port', '8080'],
+        gradedFiles: ['starter.py'],
+        image: 'workspace-image',
+        port: 8080,
+        rewriteUrl: false,
+      },
+    });
+
+    assert.deepEqual(makePreviewWorkspaceSettings(info), {
+      args: '--port 8080',
+      enableNetworking: false,
+      environment: {},
+      gradedFiles: ['starter.py'],
+      home: null,
+      image: 'workspace-image',
+      port: 8080,
+      rewriteUrl: false,
+    });
+  });
+
+  it('returns null workspace settings for questions without a workspace', () => {
+    const info = QuestionJsonSchema.parse({
+      title: 'Plain question',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111152',
+    });
+
+    assert.isNull(makePreviewWorkspaceSettings(info));
   });
 
   it('constructs synthetic Variant rows with generated-file variant identities', () => {
