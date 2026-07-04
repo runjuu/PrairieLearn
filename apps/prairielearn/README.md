@@ -33,6 +33,8 @@ Optional flags:
   to `none`. To use `redis`, start Redis and configure `redisUrl`.
 - `--dev-mode`: Enables development-mode asset handling, skips eager worker readiness checks, and
   disables some render caching. Defaults to `false`.
+- `--render-mode`: Page style for rendered questions, either `full` or `question-only`. Defaults
+  to `full`. See [Render modes](#render-modes).
 - `--question-timeout-ms`: Question-code worker timeout in milliseconds. Defaults to `5000`.
 - `--workers-count`: Maximum number of question-code workers. Defaults to `1`.
 - `--workers-execution-mode`: Worker execution mode, either `native` or `container`. Defaults to
@@ -55,6 +57,27 @@ Docker must be installed and running. The container isolates question code from 
 filesystem and processes, but does not currently restrict its outbound network access. Pass
 `--workers-execution-mode native` to run question code directly on your machine instead, where
 question `server.py` runs under your user account with its normal outbound network access.
+
+### Render modes
+
+The server renders one of two page styles, selected at launch with `--render-mode`:
+
+- `full` (default): mirrors the real PrairieLearn question preview page: a question card with the
+  question title in the header, a "Save & Grade" button, a "Correct answer" panel (shown after a
+  graded submission when the question's `showCorrectAnswer` setting allows it), and a
+  submitted-answer panel with score badges and feedback. Grading runs synchronously through the
+  production parse/grade pipeline; nothing is persisted, so refreshing the page discards the
+  submission.
+- `question-only`: just the rendered question body with the assets it needs (element CSS/JS,
+  MathJax). No card, no title, no buttons, and grading is disabled: `POST /questions/<qid>`
+  responds with `405`. Intended for embedding the question in another UI.
+
+An individual page can be narrowed with the `render-mode` query parameter, for example
+`http://127.0.0.1:4310/questions/<qid>?render-mode=question-only`. The launch flag is a hard cap: a
+`full` server can serve individual pages as `question-only`, but on a `--render-mode question-only`
+server, `?render-mode=full` is rejected with `400` because grading is disabled server-wide. Invalid
+values are also rejected with `400`, and a `POST` whose effective mode is `question-only` responds
+with `405`.
 
 ### Workspaces
 

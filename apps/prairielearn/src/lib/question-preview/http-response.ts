@@ -95,6 +95,52 @@ export function mapQuestionPreviewInvalidSubmissionActionResponse(
   );
 }
 
+export function mapQuestionPreviewInvalidRenderModeResponse(
+  renderMode: unknown,
+): QuestionPreviewHttpAction {
+  return action(
+    {
+      html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+      kind: 'html',
+      status: 400,
+    },
+    [
+      {
+        details: { renderMode },
+        message:
+          'Question preview request rejected: invalid render-mode query parameter. Expected "full" or "question-only".',
+      },
+    ],
+  );
+}
+
+export function mapQuestionPreviewRenderModeUnavailableResponse(): QuestionPreviewHttpAction {
+  return action(
+    {
+      html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+      kind: 'html',
+      status: 400,
+    },
+    [
+      {
+        details: {},
+        message:
+          'Question preview request rejected: the "full" render mode is unavailable on a question-only preview server.',
+      },
+    ],
+  );
+}
+
+export function mapQuestionPreviewGradingDisabledResponse(): QuestionPreviewHttpAction {
+  return action({ kind: 'empty', status: 405 }, [
+    {
+      details: {},
+      message:
+        'Question preview submission rejected: grading is disabled in question-only render mode.',
+    },
+  ]);
+}
+
 export function mapQuestionPreviewDocumentResponse(
   result: QuestionPreviewDocumentResult,
 ): QuestionPreviewHttpAction {
