@@ -1,8 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import fg from 'fast-glob';
+
 import { html, unsafeHtml } from '@prairielearn/html';
 import { generateSignedToken } from '@prairielearn/signed-token';
+import { workspaceFastGlobDefaultOptions } from '@prairielearn/workspace-utils';
 
 import { HeadContents } from '../../components/HeadContents.js';
 import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
@@ -18,7 +21,9 @@ import {
   makeLocalPreviewQuestionRows,
   makeLocalPreviewSubmission,
   makeLocalPreviewVariant,
+  makePreviewWorkspaceSettings,
 } from './rows.js';
+import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
 export interface QuestionPreviewSubmissionInput {
   /** Posted form fields with `__action`/`__csrf_token`/`__variant_id` already stripped. */
@@ -38,6 +43,7 @@ export interface QuestionPreviewDocumentRenderer {
 export interface QuestionPreviewDocumentRendererOptions {
   courseDir: string;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   urlPrefix: string;
 }
 
@@ -78,6 +84,7 @@ export type QuestionPreviewDocumentResult =
 interface QuestionPreviewInternalRenderInput extends QuestionPreviewDocumentInput {
   courseDir: string;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   urlPrefix: string;
 }
 
@@ -98,11 +105,13 @@ function makePreviewLocals({
   qid,
   questionId,
   urlPrefix,
+  workspaceUrl,
 }: {
   clientFilesQuestionGeneratedFileUrl: string;
   qid: QuestionPreviewQid;
   questionId: string;
   urlPrefix: string;
+  workspaceUrl: string;
 }): questionServers.QuestionRenderRequiredLocals {
   const assetUrls = makeQuestionPreviewAssetUrls({
     clientFilesQuestionGeneratedFileUrl,
@@ -120,7 +129,7 @@ function makePreviewLocals({
     questionUrl: `${urlPrefix}/question/${questionId}/`,
     showCorrectAnswer: false,
     urlPrefix,
-    workspaceUrl: '#',
+    workspaceUrl,
   };
 }
 
@@ -435,6 +444,7 @@ async function readQuestionInfo(courseDir: string, qid: QuestionPreviewQid): Pro
 async function renderQuestionPreviewDocumentResult({
   courseDir,
   localPreviewGeneratedFiles,
+  localPreviewWorkspaces,
   qid,
   submission: submissionInput,
   urlPrefix,
@@ -491,6 +501,20 @@ async function renderQuestionPreviewDocumentResult({
       variant_seed: variantSeed,
     };
 
+    const workspaceSettings = makePreviewWorkspaceSettings(info);
+    if (workspaceSettings != null) {
+      // Mirrors variant creation in the full server: non-glob graded files
+      // become required file names so `pl-workspace` can enforce them.
+      const workspaceRequiredFileNames = workspaceSettings.gradedFiles.filter(
+        (file) => !fg.isDynamicPattern(file, workspaceFastGlobDefaultOptions),
+      );
+      const requiredFileNames = generatedVariant.params._required_file_names;
+      generatedVariant.params._workspace_required_file_names = workspaceRequiredFileNames;
+      generatedVariant.params._required_file_names = (
+        Array.isArray(requiredFileNames) ? requiredFileNames : []
+      ).concat(workspaceRequiredFileNames);
+    }
+
     phase = 'prepare';
     const prepareResult = await questionServer.prepare(question, course, generatedVariant, caller);
     const prepareIssues = prepareResult.courseIssues;
@@ -524,6 +548,21 @@ async function renderQuestionPreviewDocumentResult({
       identity: localPreviewVariantIdentity,
     });
 
+    // Without a workspace allocator the workspace URL stays a placeholder
+    // `#`, so the question still renders with a non-functional button.
+    let workspaceUrl = '#';
+    if (workspaceSettings != null && localPreviewWorkspaces != null) {
+      const workspace = localPreviewWorkspaces.ensureWorkspace({
+        params: preparedVariant.params ?? {},
+        qid: qid.decoded,
+        settings: workspaceSettings,
+        trueAnswer: preparedVariant.true_answer ?? {},
+        variantSeed,
+      });
+      preparedVariant.workspace_id = workspace.workspaceId;
+      workspaceUrl = workspace.workspaceUrl;
+    }
+
     const checkAnswerSupported = question.grading_method === 'Internal';
     const submissionDiagnostics: QuestionPreviewDiagnostic[] = [];
     let submission: Submission | null = null;
@@ -535,10 +574,42 @@ async function renderQuestionPreviewDocumentResult({
       } else {
         phase = 'parse';
         const rawSubmittedAnswer = submissionInput.rawSubmittedAnswer;
+
+        // Mirrors `saveSubmission` in the full server: the workspace's graded
+        // files are injected into `submitted_answer._files` before parsing,
+        // and file-collection failures become a `_files` format error. The
+        // variant is regenerated from the seed on this request, but generate
+        // and prepare are deterministic per seed, so the files come from the
+        // same workspace the user edited.
+        let submittedAnswer = rawSubmittedAnswer;
+        let workspaceFormatErrors: Record<string, unknown> | undefined;
+        if (
+          workspaceSettings != null &&
+          localPreviewWorkspaces != null &&
+          workspaceSettings.gradedFiles.length > 0
+        ) {
+          const collected = await localPreviewWorkspaces.collectGradedFiles({
+            qid: qid.decoded,
+            variantSeed,
+          });
+          if (!collected.ok) {
+            workspaceFormatErrors = { _files: [collected.formatError] };
+          } else if (collected.files.length > 0) {
+            const existingFiles = Array.isArray(rawSubmittedAnswer._files)
+              ? rawSubmittedAnswer._files
+              : [];
+            submittedAnswer = {
+              ...rawSubmittedAnswer,
+              _files: [...existingFiles, ...collected.files],
+            };
+          }
+        }
+
         const parseResult = await questionServer.parse(
           {
-            submitted_answer: rawSubmittedAnswer,
+            submitted_answer: submittedAnswer,
             raw_submitted_answer: rawSubmittedAnswer,
+            format_errors: workspaceFormatErrors,
             gradable: true,
           },
           preparedVariant,
@@ -623,6 +694,7 @@ async function renderQuestionPreviewDocumentResult({
         qid,
         questionId: question.id,
         urlPrefix,
+        workspaceUrl,
       }),
       question,
       renderSelection: { question: true, submissions: submission != null },
@@ -692,6 +764,7 @@ async function renderQuestionPreviewDocumentResult({
 export function createQuestionPreviewDocumentRenderer({
   courseDir,
   localPreviewGeneratedFiles,
+  localPreviewWorkspaces = null,
   urlPrefix,
 }: QuestionPreviewDocumentRendererOptions): QuestionPreviewDocumentRenderer {
   const resolvedCourseDir = path.resolve(courseDir);
@@ -701,6 +774,7 @@ export function createQuestionPreviewDocumentRenderer({
       return renderQuestionPreviewDocumentResult({
         courseDir: resolvedCourseDir,
         localPreviewGeneratedFiles,
+        localPreviewWorkspaces,
         qid: input.qid,
         submission: input.submission,
         urlPrefix,

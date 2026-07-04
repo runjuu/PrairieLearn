@@ -37,12 +37,44 @@ Optional flags:
 - `--workers-count`: Maximum number of question-code workers. Defaults to `1`.
 - `--workers-execution-mode`: Worker execution mode, either `native` or `container`. Defaults to
   `container`.
+- `--no-workspaces`: Disables workspace support. Workspace questions then render with a
+  placeholder `#` workspace link instead of a working workspace button.
+- `--workspace-home-dir`: Directory for workspace home directories. Defaults to a per-run
+  temporary directory that is deleted on shutdown; an explicit directory is kept.
+- `--workspace-idle-timeout-ms`: Idle time before a workspace container is stopped. Defaults to
+  `1800000` (30 minutes).
+- `--workspace-start-timeout-ms`: Maximum time to wait for a workspace container to respond after
+  starting. Defaults to `60000`.
+- `--workspace-max-containers`: Maximum number of concurrently running workspace containers; the
+  least recently used workspace is stopped to make room. Defaults to `3`.
+- `--workspace-pull-policy`: When to pull workspace images, one of `missing`, `always`, or
+  `never`. Defaults to `missing`.
 
 With the default `container` mode, the local server runs question code inside a Docker container, so
 Docker must be installed and running. The container isolates question code from your machine's
 filesystem and processes, but does not currently restrict its outbound network access. Pass
 `--workers-execution-mode native` to run question code directly on your machine instead, where
 question `server.py` runs under your user account with its normal outbound network access.
+
+### Workspaces
+
+Questions with `workspaceOptions` get a working workspace button: the preview server launches the
+workspace image as a local Docker container, generates the workspace files (static `workspace/`
+files, rendered `workspaceTemplates/`, and dynamic `_workspace_files`), and proxies the workspace
+page at `/workspace/<id>` to the container, including websocket traffic. The workspace page shows
+launch progress (including image pull progress) and has Reboot (keep files) and Reset (regenerate
+files) controls. Workspaces are keyed by question and variant seed, so refreshing the question or
+reopening the workspace reuses the same container and files.
+
+When checking answers on an internally graded workspace question, the question's `gradedFiles` are
+collected from the local workspace home directory into `_files`, mirroring the full server.
+
+Workspaces require Docker to be reachable; when it is not, the question still renders and the
+workspace page reports the failure. Containers are stopped when idle, capped in number, removed on
+shutdown (including Ctrl-C), and labeled so that containers orphaned by a crashed server are
+removed on the next startup. Note that `enableNetworking: false` is not enforced locally: the
+container keeps its normal bridge networking, and only the `WORKSPACE_NETWORKING_DISABLED`
+environment variable is set, matching workspace hosts without no-internet network support.
 
 This is distinct from production Quesal preview: the local server does not implement Quesal
 authorization, Source Course Reference resolution, Temporary Preview Course materialization,
