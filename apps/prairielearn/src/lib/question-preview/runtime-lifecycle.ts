@@ -1,4 +1,4 @@
-import type { QuestionPreviewDocumentInput } from './document.js';
+import type { QuestionPreviewDocumentInput, QuestionPreviewRenderMode } from './document.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import type {
   QuestionPreviewCacheType,
@@ -21,6 +21,7 @@ export interface QuestionPreviewRuntimeLifecycleStartupOptions {
   devMode?: boolean;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
+  renderMode?: QuestionPreviewRenderMode;
   startupLogger?: QuestionPreviewStartupLogger;
   workersCount?: number;
   workersExecutionMode?: QuestionPreviewWorkersExecutionMode;

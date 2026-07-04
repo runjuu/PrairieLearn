@@ -5,8 +5,11 @@ import {
   mapQuestionPreviewAssetFileResponse,
   mapQuestionPreviewDocumentResponse,
   mapQuestionPreviewGeneratedFileResponse,
+  mapQuestionPreviewGradingDisabledResponse,
   mapQuestionPreviewInvalidQidResponse,
+  mapQuestionPreviewInvalidRenderModeResponse,
   mapQuestionPreviewInvalidSubmissionActionResponse,
+  mapQuestionPreviewRenderModeUnavailableResponse,
   mapQuestionPreviewRouteErrorResponse,
 } from './http-response.js';
 
@@ -144,6 +147,47 @@ describe('question preview HTTP response mapping', () => {
         kind: 'html',
         status: 400,
       },
+    });
+
+    assert.deepEqual(mapQuestionPreviewInvalidRenderModeResponse('bogus'), {
+      logs: [
+        {
+          details: { renderMode: 'bogus' },
+          message:
+            'Question preview request rejected: invalid render-mode query parameter. Expected "full" or "question-only".',
+        },
+      ],
+      response: {
+        html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+        kind: 'html',
+        status: 400,
+      },
+    });
+
+    assert.deepEqual(mapQuestionPreviewRenderModeUnavailableResponse(), {
+      logs: [
+        {
+          details: {},
+          message:
+            'Question preview request rejected: the "full" render mode is unavailable on a question-only preview server.',
+        },
+      ],
+      response: {
+        html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+        kind: 'html',
+        status: 400,
+      },
+    });
+
+    assert.deepEqual(mapQuestionPreviewGradingDisabledResponse(), {
+      logs: [
+        {
+          details: {},
+          message:
+            'Question preview submission rejected: grading is disabled in question-only render mode.',
+        },
+      ],
+      response: { kind: 'empty', status: 405 },
     });
 
     const notFoundError = { status: 404 };

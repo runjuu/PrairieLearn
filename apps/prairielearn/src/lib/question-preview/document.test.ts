@@ -6,6 +6,7 @@ import { assert, describe, it } from 'vitest';
 
 import {
   type QuestionPreviewDocumentRenderer,
+  type QuestionPreviewRenderMode,
   createQuestionPreviewDocumentRenderer,
 } from './document.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
@@ -78,7 +79,11 @@ async function withInitializedDocumentRenderer<T>(
   callback: (renderer: QuestionPreviewDocumentRenderer) => Promise<T>,
   {
     localPreviewWorkspaces = null,
-  }: { localPreviewWorkspaces?: PreviewWorkspaceAllocator | null } = {},
+    renderMode,
+  }: {
+    localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
+    renderMode?: QuestionPreviewRenderMode;
+  } = {},
 ) {
   const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' });
   const runtime = await createQuestionPreviewRuntime({
@@ -91,6 +96,7 @@ async function withInitializedDocumentRenderer<T>(
     courseDir,
     localPreviewGeneratedFiles,
     localPreviewWorkspaces,
+    renderMode,
     urlPrefix: '/preview',
   });
 
@@ -182,11 +188,15 @@ describe('question preview document', () => {
         assert.deepEqual(result.diagnostics, []);
         assert.match(result.documentHtml, /^<!doctype html>/i);
         assert.match(result.documentHtml, /<head>/);
+        assert.match(result.documentHtml, /<title>\s*Preview test/);
         assert.match(result.documentHtml, /document\.urlPrefix = '\/preview'/);
         assert.match(result.documentHtml, /\/assets\//);
         assert.match(result.documentHtml, /<body>/);
-        assert.match(result.documentHtml, /class="question-container"/);
+        assert.match(result.documentHtml, /class="question-container mb-4"/);
         assert.match(result.documentHtml, /class="question-form"/);
+        assert.match(result.documentHtml, /class="card mb-3 question-block"/);
+        assert.match(result.documentHtml, /card-header bg-primary text-white/);
+        assert.match(result.documentHtml, /<h1>\s*Preview test\s*<\/h1>/);
         assert.match(result.documentHtml, /class="[^"]*question-body[^"]*"/);
         assert.match(result.documentHtml, /data-grading-method="Internal"/);
         assert.match(result.documentHtml, /data-variant-id="1"/);
@@ -194,10 +204,13 @@ describe('question preview document', () => {
         assert.match(result.documentHtml, /Rendered preview/);
         assert.match(result.documentHtml, /name="__action"/);
         assert.match(result.documentHtml, /value="grade"/);
-        assert.match(result.documentHtml, /Check answer/);
+        assert.match(result.documentHtml, /disable-on-submit/);
+        assert.match(result.documentHtml, /Save &amp; Grade/);
+        assert.match(result.documentHtml, /class="card mb-3 grading-block d-none"/);
+        assert.notMatch(result.documentHtml, /Check answer/);
+        assert.notMatch(result.documentHtml, /Save only/);
+        assert.notMatch(result.documentHtml, /New variant/);
         assert.notMatch(result.documentHtml, /submission-block/);
-        assert.notMatch(result.documentHtml, /question-block/);
-        assert.notMatch(result.documentHtml, /card-header/);
         assert.equal('payload' in result, false);
       });
     } finally {
@@ -445,9 +458,13 @@ describe('question preview document', () => {
         assert.equal(correct.ok, true);
         assert.deepEqual(correct.diagnostics, []);
         assert.match(correct.documentHtml, /data-testid="submission-block"/);
+        assert.match(correct.documentHtml, /data-testid="submission-with-feedback"/);
+        assert.match(correct.documentHtml, /Submitted answer/);
         assert.match(correct.documentHtml, /text-bg-success/);
         assert.match(correct.documentHtml, /100%/);
-        assert.match(correct.documentHtml, /Check answer/);
+        assert.match(correct.documentHtml, /Save &amp; Grade/);
+        assert.match(correct.documentHtml, /class="card mb-3 grading-block"/);
+        assert.match(correct.documentHtml, /Correct answer/);
 
         const wrong = await renderer.render({
           qid,
@@ -472,6 +489,7 @@ describe('question preview document', () => {
         const refreshed = await renderer.render({ qid, variantSeed: '1' });
         assert.equal(refreshed.ok, true);
         assert.notMatch(refreshed.documentHtml, /submission-block/);
+        assert.match(refreshed.documentHtml, /class="card mb-3 grading-block d-none"/);
       });
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -726,9 +744,9 @@ describe('question preview document', () => {
 
         const rendered = await renderer.render({ qid, variantSeed: '1' });
         assert.equal(rendered.ok, true);
-        assert.notMatch(rendered.documentHtml, /Check answer<\/button>/);
-        assert.match(rendered.documentHtml, /Check answer is unavailable/);
-        assert.match(rendered.documentHtml, /External grading/);
+        assert.notMatch(rendered.documentHtml, /question-grade/);
+        assert.match(rendered.documentHtml, /Save &amp; Grade is unavailable/);
+        assert.match(rendered.documentHtml, /External\s+grading/);
 
         const submitted = await renderer.render({
           qid,
@@ -742,6 +760,169 @@ describe('question preview document', () => {
         assert.match(submitted.documentHtml, /Only internally graded questions/);
         assert.notMatch(submitted.documentHtml, /submission-block/);
       });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('keeps the correct answer panel hidden when the question disables it', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(
+      courseDir,
+      'demo/no-correct-answer',
+      '11111111-1111-4111-8111-111111111126',
+      { info: { showCorrectAnswer: false } },
+    );
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('demo/no-correct-answer'),
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: '2' } },
+        });
+
+        assert.equal(result.ok, true);
+        assert.match(result.documentHtml, /data-testid="submission-block"/);
+        assert.match(result.documentHtml, /100%/);
+        assert.match(result.documentHtml, /class="card mb-3 grading-block d-none"/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('falls back to the QID when the question has no title', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(
+      courseDir,
+      'demo/untitled',
+      '11111111-1111-4111-8111-111111111127',
+      {
+        info: { title: ' ' },
+      },
+    );
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('demo/untitled'),
+          variantSeed: '1',
+        });
+
+        assert.equal(result.ok, true);
+        assert.match(result.documentHtml, /<title>\s*demo\/untitled/);
+        assert.match(
+          result.documentHtml,
+          /<h1>\s*<span class="font-monospace">demo\/untitled<\/span>\s*<\/h1>/,
+        );
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('renders a bare question body in question-only render mode', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'demo/preview', {
+      title: 'Preview test',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111128',
+    });
+    await writeQuestionFile(
+      courseDir,
+      'demo/preview',
+      'question.html',
+      '<p>Rendered preview</p><pl-number-input answers-name="x"></pl-number-input>',
+    );
+
+    try {
+      await withInitializedDocumentRenderer(
+        courseDir,
+        async (renderer) => {
+          const result = await renderer.render({
+            qid: parsePreviewQid('demo/preview'),
+            variantSeed: '123',
+          });
+
+          assert.equal(result.ok, true);
+          assert.deepEqual(result.diagnostics, []);
+          assert.match(result.documentHtml, /<title>\s*Preview test/);
+          assert.match(result.documentHtml, /document\.urlPrefix = '\/preview'/);
+          assert.match(result.documentHtml, /\/assets\//);
+          assert.match(result.documentHtml, /class="question-container"/);
+          assert.match(result.documentHtml, /class="question-body"/);
+          assert.match(result.documentHtml, /data-variant-id="1"/);
+          assert.match(result.documentHtml, /Rendered preview/);
+          assert.notMatch(result.documentHtml, /question-form/);
+          assert.notMatch(result.documentHtml, /question-block/);
+          assert.notMatch(result.documentHtml, /grading-block/);
+          assert.notMatch(result.documentHtml, /__action/);
+          assert.notMatch(result.documentHtml, /data-grading-method/);
+          assert.notMatch(result.documentHtml, /data-variant-token/);
+          assert.notMatch(result.documentHtml, /<h1/);
+        },
+        { renderMode: 'question-only' },
+      );
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('honors a per-render render mode override', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(courseDir, 'demo/override', '11111111-1111-4111-8111-111111111130');
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const qid = parsePreviewQid('demo/override');
+
+        const overridden = await renderer.render({
+          qid,
+          variantSeed: '1',
+          renderMode: 'question-only',
+        });
+        assert.equal(overridden.ok, true);
+        assert.match(overridden.documentHtml, /class="question-body"/);
+        assert.notMatch(overridden.documentHtml, /question-form/);
+        assert.notMatch(overridden.documentHtml, /question-block/);
+
+        const unchanged = await renderer.render({ qid, variantSeed: '1' });
+        assert.equal(unchanged.ok, true);
+        assert.match(unchanged.documentHtml, /question-form/);
+        assert.match(unchanged.documentHtml, /Save &amp; Grade/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects submissions in question-only render mode', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(courseDir, 'demo/gradable', '11111111-1111-4111-8111-111111111129');
+
+    try {
+      await withInitializedDocumentRenderer(
+        courseDir,
+        async (renderer) => {
+          const result = await renderer.render({
+            qid: parsePreviewQid('demo/gradable'),
+            variantSeed: '1',
+            submission: { rawSubmittedAnswer: { ans: '2' } },
+          });
+
+          assert.equal(result.ok, false);
+          assertGenericFailureDocument(result.documentHtml);
+          assert.equal(result.diagnostics[0].fatal, true);
+          assert.equal(result.diagnostics[0].phase, 'input');
+          assert.match(
+            result.diagnostics[0].message,
+            /Submissions are not supported in question-only render mode/,
+          );
+        },
+        { renderMode: 'question-only' },
+      );
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
     }

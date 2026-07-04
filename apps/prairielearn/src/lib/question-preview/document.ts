@@ -4,15 +4,18 @@ import path from 'node:path';
 import fg from 'fast-glob';
 
 import { html, unsafeHtml } from '@prairielearn/html';
+import { markdownToHtml } from '@prairielearn/markdown';
 import { generateSignedToken } from '@prairielearn/signed-token';
 import { workspaceFastGlobDefaultOptions } from '@prairielearn/workspace-utils';
 
 import { HeadContents } from '../../components/HeadContents.js';
+import { QuestionTitle } from '../../components/QuestionContainer.js';
 import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
+import { type SubmissionForRender, SubmissionPanel } from '../../components/SubmissionPanel.js';
 import * as questionServers from '../../question-servers/index.js';
 import { type QuestionJson, QuestionJsonSchema } from '../../schemas/index.js';
 import { config } from '../config.js';
-import type { Question, Submission, Variant } from '../db-types.js';
+import type { Course, Question, Submission, Variant } from '../db-types.js';
 
 import { makeQuestionPreviewAssetUrls } from './assets.js';
 import { type LocalPreviewGeneratedFiles } from './generated-files.js';
@@ -34,16 +37,21 @@ export interface QuestionPreviewDocumentInput {
   qid: QuestionPreviewQid;
   variantSeed?: string;
   submission?: QuestionPreviewSubmissionInput;
+  /** Overrides the renderer's configured render mode for this render only. */
+  renderMode?: QuestionPreviewRenderMode;
 }
 
 export interface QuestionPreviewDocumentRenderer {
   render(input: QuestionPreviewDocumentInput): Promise<QuestionPreviewDocumentResult>;
 }
 
+export type QuestionPreviewRenderMode = 'full' | 'question-only';
+
 export interface QuestionPreviewDocumentRendererOptions {
   courseDir: string;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
+  renderMode?: QuestionPreviewRenderMode;
   urlPrefix: string;
 }
 
@@ -85,6 +93,7 @@ interface QuestionPreviewInternalRenderInput extends QuestionPreviewDocumentInpu
   courseDir: string;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
+  renderMode: QuestionPreviewRenderMode;
   urlPrefix: string;
 }
 
@@ -104,12 +113,14 @@ function makePreviewLocals({
   clientFilesQuestionGeneratedFileUrl,
   qid,
   questionId,
+  showCorrectAnswer,
   urlPrefix,
   workspaceUrl,
 }: {
   clientFilesQuestionGeneratedFileUrl: string;
   qid: QuestionPreviewQid;
   questionId: string;
+  showCorrectAnswer: boolean;
   urlPrefix: string;
   workspaceUrl: string;
 }): questionServers.QuestionRenderRequiredLocals {
@@ -127,7 +138,7 @@ function makePreviewLocals({
     clientFilesQuestionUrl: assetUrls.clientFilesQuestionUrl,
     externalImageCaptureUrl: null,
     questionUrl: `${urlPrefix}/question/${questionId}/`,
-    showCorrectAnswer: false,
+    showCorrectAnswer,
     urlPrefix,
     workspaceUrl,
   };
@@ -209,16 +220,18 @@ function isQuestionPreviewPhase(value: unknown): value is QuestionPreviewPhase {
 
 function renderQuestionPreviewShellHeadHtml({
   extraHeadersHtml,
+  pageTitle,
   questionType,
   urlPrefix,
 }: {
   extraHeadersHtml: string;
+  pageTitle: string;
   questionType: Question['type'];
   urlPrefix: string;
 }): string {
   return html`
     ${HeadContents({
-      pageTitle: 'Question Preview',
+      pageTitle,
       resLocals: {},
     })}
     ${QuestionHeadContents({ extraHeadersHtml, questionType, urlPrefix })}
@@ -226,32 +239,22 @@ function renderQuestionPreviewShellHeadHtml({
 }
 
 type QuestionPreviewSubmissionPanel =
-  | {
-      kind: 'graded';
-      gradable: boolean;
-      manualFeedback: string | null;
-      score: number | null;
-      submissionHtml: string;
-    }
+  | { kind: 'graded'; submission: Submission; submissionHtml: string }
   | { kind: 'unsupported-grading-method'; gradingMethod: Question['grading_method'] };
 
-function renderSubmissionStatusBadge({
-  gradable,
-  score,
+function renderQuestionPreviewSubmissionPanelHtml({
+  course,
+  question,
+  submissionPanel,
+  urlPrefix,
+  variant,
 }: {
-  gradable: boolean;
-  score: number | null;
+  course: Course;
+  question: Question;
+  submissionPanel: QuestionPreviewSubmissionPanel;
+  urlPrefix: string;
+  variant: Variant;
 }) {
-  if (!gradable) return html`<span class="badge text-bg-danger">invalid, not gradable</span>`;
-  if (score == null) return html`<span class="badge text-bg-secondary">not graded</span>`;
-
-  const percentage = `${Math.floor(score * 100)}%`;
-  if (score >= 1) return html`<span class="badge text-bg-success">${percentage}</span>`;
-  if (score > 0) return html`<span class="badge text-bg-warning">${percentage}</span>`;
-  return html`<span class="badge text-bg-danger">${percentage}</span>`;
-}
-
-function renderQuestionPreviewSubmissionPanelHtml(submissionPanel: QuestionPreviewSubmissionPanel) {
   if (submissionPanel.kind === 'unsupported-grading-method') {
     return html`
       <div class="alert alert-secondary" role="alert">
@@ -261,72 +264,130 @@ function renderQuestionPreviewSubmissionPanelHtml(submissionPanel: QuestionPrevi
     `;
   }
 
-  return html`
-    <div class="card mb-4 submission-panel" data-testid="submission-block">
-      <div class="card-header bg-light d-flex align-items-center gap-2">
-        <h2 class="h6 fw-normal mb-0">Submitted answer</h2>
-        ${renderSubmissionStatusBadge(submissionPanel)}
-      </div>
-      <div class="card-body overflow-x-auto submission-body">
-        ${unsafeHtml(submissionPanel.submissionHtml)}
-      </div>
-      ${submissionPanel.manualFeedback == null
-        ? ''
-        : html`
-            <div class="card-footer">
-              <h3 class="h6">Feedback</h3>
-              <p class="mb-0" style="white-space: pre-wrap;">${submissionPanel.manualFeedback}</p>
-            </div>
-          `}
-    </div>
-  `;
+  const { submission, submissionHtml } = submissionPanel;
+  const submissionForRender: SubmissionForRender = {
+    ...submission,
+    grading_job: null,
+    user_uid: null,
+    submission_number: 1,
+    feedback_manual_html: submission.feedback?.manual
+      ? markdownToHtml(submission.feedback.manual.toString())
+      : undefined,
+  };
+
+  return SubmissionPanel({
+    course,
+    question,
+    questionContext: 'instructor',
+    submission: submissionForRender,
+    submissionCount: 1,
+    submissionHtml,
+    urlPrefix,
+    variant_id: variant.id,
+  });
 }
 
 function renderQuestionPreviewBodyHtml({
+  answerHtml,
   checkAnswerSupported,
+  course,
   question,
   questionHtml,
+  showCorrectAnswer,
   submissionPanel,
+  urlPrefix,
   variant,
   variantToken,
 }: {
+  answerHtml: string;
   checkAnswerSupported: boolean;
+  course: Course;
   question: Question;
   questionHtml: string;
+  showCorrectAnswer: boolean;
   submissionPanel: QuestionPreviewSubmissionPanel | null;
+  urlPrefix: string;
   variant: Variant;
   variantToken: string;
 }): string {
   return html`
     <div
-      class="question-container"
+      class="question-container mb-4"
       data-grading-method="${question.grading_method}"
       data-variant-id="${variant.id}"
       data-variant-token="${variantToken}"
       data-workspace-id="${variant.workspace_id ?? ''}"
     >
       <form class="question-form" name="question-form" method="POST" autocomplete="off">
-        <div class="question-body">${unsafeHtml(questionHtml)}</div>
-        ${checkAnswerSupported
-          ? html`
-              <div class="mt-3">
-                <button
-                  type="submit"
-                  class="btn btn-primary question-grade"
-                  name="__action"
-                  value="grade"
-                >
-                  Check answer
-                </button>
-              </div>
-            `
-          : html`
-              <p class="small text-muted mt-3 mb-0">
-                Check answer is unavailable: this question uses ${question.grading_method} grading.
-              </p>
-            `}
+        <div class="card mb-3 question-block">
+          <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
+            <h1>
+              ${QuestionTitle({ questionContext: 'instructor', question, questionNumber: '' })}
+            </h1>
+          </div>
+          <div class="card-body overflow-x-auto question-body">${unsafeHtml(questionHtml)}</div>
+          <div class="card-footer" id="question-panel-footer">
+            ${checkAnswerSupported
+              ? html`
+                  <button
+                    type="submit"
+                    class="btn btn-primary question-grade disable-on-submit"
+                    name="__action"
+                    value="grade"
+                  >
+                    Save &amp; Grade
+                  </button>
+                  <input
+                    type="hidden"
+                    name="__variant_id"
+                    value="${variant.id}"
+                    data-skip-unload-check="true"
+                  />
+                `
+              : html`
+                  <p class="small text-muted mb-0">
+                    Save &amp; Grade is unavailable: this question uses ${question.grading_method}
+                    grading.
+                  </p>
+                `}
+          </div>
+        </div>
       </form>
-      ${submissionPanel == null ? '' : renderQuestionPreviewSubmissionPanelHtml(submissionPanel)}
+      <div class="card mb-3 grading-block${showCorrectAnswer ? '' : ' d-none'}">
+        <div class="card-header bg-secondary text-white">
+          <h2>Correct answer</h2>
+        </div>
+        <div class="card-body overflow-x-auto answer-body">
+          ${showCorrectAnswer ? unsafeHtml(answerHtml) : ''}
+        </div>
+      </div>
+      ${submissionPanel == null
+        ? ''
+        : renderQuestionPreviewSubmissionPanelHtml({
+            course,
+            question,
+            submissionPanel,
+            urlPrefix,
+            variant,
+          })}
+    </div>
+  `.toString();
+}
+
+function renderQuestionOnlyPreviewBodyHtml({
+  questionHtml,
+  variant,
+}: {
+  questionHtml: string;
+  variant: Variant;
+}): string {
+  return html`
+    <div
+      class="question-container"
+      data-variant-id="${variant.id}"
+      data-workspace-id="${variant.workspace_id ?? ''}"
+    >
+      <div class="question-body">${unsafeHtml(questionHtml)}</div>
     </div>
   `.toString();
 }
@@ -446,6 +507,7 @@ async function renderQuestionPreviewDocumentResult({
   localPreviewGeneratedFiles,
   localPreviewWorkspaces,
   qid,
+  renderMode,
   submission: submissionInput,
   urlPrefix,
   variantSeed = '1',
@@ -453,6 +515,15 @@ async function renderQuestionPreviewDocumentResult({
   let phase: QuestionPreviewPhase = 'input';
 
   try {
+    // The HTTP layer already rejects POSTs in question-only mode; this guards
+    // the programmatic `runtime.render()` seam.
+    if (renderMode === 'question-only' && submissionInput != null) {
+      throw new ExpectedQuestionPreviewError(
+        'Submissions are not supported in question-only render mode.',
+        { phase: 'input' },
+      );
+    }
+
     validateQuestionPreviewVariantSeed(variantSeed);
 
     phase = 'metadata';
@@ -686,6 +757,9 @@ async function renderQuestionPreviewDocumentResult({
       }
     }
 
+    const showCorrectAnswer =
+      renderMode === 'full' && question.show_correct_answer === true && submission != null;
+
     phase = 'render';
     const renderResult = await questionServer.render({
       course,
@@ -693,11 +767,16 @@ async function renderQuestionPreviewDocumentResult({
         clientFilesQuestionGeneratedFileUrl: localPreviewVariantIdentity.generatedFilesUrl,
         qid,
         questionId: question.id,
+        showCorrectAnswer,
         urlPrefix,
         workspaceUrl,
       }),
       question,
-      renderSelection: { question: true, submissions: submission != null },
+      renderSelection: {
+        question: true,
+        submissions: submission != null,
+        answer: showCorrectAnswer,
+      },
       submission,
       submissions: submission == null ? [] : [submission],
       variant: preparedVariant,
@@ -721,30 +800,38 @@ async function renderQuestionPreviewDocumentResult({
         ? null
         : {
             kind: 'graded',
-            gradable: submission.gradable === true,
-            manualFeedback:
-              typeof submission.feedback?.manual === 'string' ? submission.feedback.manual : null,
-            score: submission.score,
+            submission,
             submissionHtml: renderResult.data.submissionHtmls[0] ?? '',
           };
 
     const extraHeadersHtml = renderResult.data.extraHeadersHtml;
     const shellHeadHtml = renderQuestionPreviewShellHeadHtml({
       extraHeadersHtml,
+      pageTitle: question.title?.trim() || qid.decoded,
       questionType: question.type,
       urlPrefix,
     });
-    const bodyHtml = renderQuestionPreviewBodyHtml({
-      checkAnswerSupported,
-      question,
-      questionHtml: renderResult.data.questionHtml,
-      submissionPanel,
-      variant: preparedVariant,
-      variantToken: generateSignedToken(
-        { variantId: preparedVariant.id.toString() },
-        config.secretKey,
-      ),
-    });
+    const bodyHtml =
+      renderMode === 'question-only'
+        ? renderQuestionOnlyPreviewBodyHtml({
+            questionHtml: renderResult.data.questionHtml,
+            variant: preparedVariant,
+          })
+        : renderQuestionPreviewBodyHtml({
+            answerHtml: renderResult.data.answerHtml,
+            checkAnswerSupported,
+            course,
+            question,
+            questionHtml: renderResult.data.questionHtml,
+            showCorrectAnswer,
+            submissionPanel,
+            urlPrefix,
+            variant: preparedVariant,
+            variantToken: generateSignedToken(
+              { variantId: preparedVariant.id.toString() },
+              config.secretKey,
+            ),
+          });
 
     return makeQuestionPreviewSuccessResult({
       bodyHtml,
@@ -765,6 +852,7 @@ export function createQuestionPreviewDocumentRenderer({
   courseDir,
   localPreviewGeneratedFiles,
   localPreviewWorkspaces = null,
+  renderMode = 'full',
   urlPrefix,
 }: QuestionPreviewDocumentRendererOptions): QuestionPreviewDocumentRenderer {
   const resolvedCourseDir = path.resolve(courseDir);
@@ -776,6 +864,7 @@ export function createQuestionPreviewDocumentRenderer({
         localPreviewGeneratedFiles,
         localPreviewWorkspaces,
         qid: input.qid,
+        renderMode: input.renderMode ?? renderMode,
         submission: input.submission,
         urlPrefix,
         variantSeed: input.variantSeed,

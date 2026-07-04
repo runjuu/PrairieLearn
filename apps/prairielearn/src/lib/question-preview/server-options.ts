@@ -4,6 +4,7 @@ import path from 'node:path';
 import minimist from 'minimist';
 import { z } from 'zod';
 
+import type { QuestionPreviewRenderMode } from './document.js';
 import {
   type QuestionPreviewCacheType,
   type QuestionPreviewWorkersExecutionMode,
@@ -26,6 +27,7 @@ const SUPPORTED_FLAGS = new Set([
   'host',
   'port',
   'question-timeout-ms',
+  'render-mode',
   'workers-count',
   'workers-execution-mode',
   'workspace-home-dir',
@@ -40,6 +42,7 @@ export interface QuestionPreviewServerHttpOptions {
   courseDir: string;
   host: string;
   port: number;
+  renderMode: QuestionPreviewRenderMode;
 }
 
 export interface QuestionPreviewServerRuntimeOptions extends QuestionPreviewRuntimeLifecycleStartupOptions {
@@ -47,6 +50,7 @@ export interface QuestionPreviewServerRuntimeOptions extends QuestionPreviewRunt
   courseDir: string;
   devMode: boolean;
   questionTimeoutMilliseconds: number;
+  renderMode: QuestionPreviewRenderMode;
   workersCount: number;
   workersExecutionMode: QuestionPreviewWorkersExecutionMode;
 }
@@ -153,6 +157,21 @@ function parseCacheType(value: string | undefined, ctx: z.RefinementCtx): Questi
   return cacheType;
 }
 
+function parseRenderMode(
+  value: string | undefined,
+  ctx: z.RefinementCtx,
+): QuestionPreviewRenderMode {
+  const renderMode = value ?? 'full';
+  if (renderMode !== 'full' && renderMode !== 'question-only') {
+    return addIssue(
+      ctx,
+      `Invalid --render-mode "${renderMode}". Expected "full" or "question-only".`,
+    );
+  }
+
+  return renderMode;
+}
+
 function parseWorkspacePullPolicy(
   value: string | undefined,
   ctx: z.RefinementCtx,
@@ -181,6 +200,7 @@ const QuestionPreviewServerOptionsSchema = z.object({
     (value, ctx) =>
       parsePositiveInteger(value, 'question-timeout-ms', DEFAULT_QUESTION_TIMEOUT_MS, ctx),
   ),
+  renderMode: singleStringFlagSchema('render-mode').transform(parseRenderMode),
   workersCount: singleStringFlagSchema('workers-count').transform((value, ctx) =>
     parsePositiveInteger(value, 'workers-count', 1, ctx),
   ),
@@ -245,6 +265,7 @@ export async function parseQuestionPreviewServerOptions(
       'host',
       'port',
       'question-timeout-ms',
+      'render-mode',
       'workers-count',
       'workers-execution-mode',
       'workspace-home-dir',
@@ -271,6 +292,7 @@ export async function parseQuestionPreviewServerOptions(
     host: argv.host,
     port: argv.port,
     questionTimeoutMilliseconds: argv['question-timeout-ms'],
+    renderMode: argv['render-mode'],
     workersCount: argv['workers-count'],
     workersExecutionMode: argv['workers-execution-mode'],
     workspaceHomeDir: argv['workspace-home-dir'],
@@ -296,6 +318,7 @@ export function getQuestionPreviewServerHttpOptions(
     courseDir: options.courseDir,
     host: options.host,
     port: options.port,
+    renderMode: options.renderMode,
   };
 }
 
@@ -307,6 +330,7 @@ export function getQuestionPreviewServerRuntimeOptions(
     courseDir: options.courseDir,
     devMode: options.devMode,
     questionTimeoutMilliseconds: options.questionTimeoutMilliseconds,
+    renderMode: options.renderMode,
     workersCount: options.workersCount,
     workersExecutionMode: options.workersExecutionMode,
   };

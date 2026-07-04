@@ -217,6 +217,7 @@ describe('question preview server startup', () => {
         host: '127.0.0.1',
         port: 4310,
         questionTimeoutMilliseconds: 5000,
+        renderMode: 'full',
         workersCount: 1,
         workersExecutionMode: 'container',
         workspaceHomeDir: undefined,
@@ -239,6 +240,8 @@ describe('question preview server startup', () => {
         '0',
         '--question-timeout-ms',
         '1',
+        '--render-mode',
+        'question-only',
         '--workers-count',
         '4',
         '--workers-execution-mode',
@@ -263,6 +266,7 @@ describe('question preview server startup', () => {
         host: '0.0.0.0',
         port: 0,
         questionTimeoutMilliseconds: 1,
+        renderMode: 'question-only',
         workersCount: 4,
         workersExecutionMode: 'native',
         workspaceHomeDir: path.resolve('preview-homes'),
@@ -311,6 +315,10 @@ describe('question preview server startup', () => {
       {
         argv: ['--course-dir', courseDir, '--cache-type', 'disk'],
         message: /Invalid --cache-type/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--render-mode', 'bogus'],
+        message: /Invalid --render-mode/,
       },
       {
         argv: ['--course-dir', courseDir, '--workers-execution-mode', 'disabled'],
@@ -1228,6 +1236,125 @@ describe('question preview server direct preview route', () => {
     }
   });
 
+  it('rejects posted answers without invoking the runtime in question-only render mode', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: unknown[] = [];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0', '--render-mode', 'question-only'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push({ qid: input.qid.decoded, submission: input.submission });
+          return testSuccessDocument('<p>Question-only preview body</p>');
+        },
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const getResponse = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
+      const getHtml = await getResponse.text();
+
+      assert.equal(getResponse.status, 200);
+      assert.match(getHtml, /Question-only preview body/);
+
+      const postResponse = await fetch(`${baseUrl}/questions/demo/example?variant=1`, {
+        body: new URLSearchParams({ __action: 'grade', ans: '42' }),
+        method: 'POST',
+      });
+      const postBody = await postResponse.text();
+
+      assert.equal(postResponse.status, 405);
+      assert.equal(postBody, '');
+      assert.deepEqual(renderCalls, [{ qid: 'demo/example', submission: undefined }]);
+      assert.equal(consoleError.mock.calls.length, 1);
+      assert.match(
+        String(consoleError.mock.calls[0]?.[0]),
+        /grading is disabled in question-only render mode/,
+      );
+
+      const upgradeResponse = await fetch(
+        `${baseUrl}/questions/demo/example?render-mode=full&variant=1`,
+      );
+      const upgradeHtml = await upgradeResponse.text();
+
+      assert.equal(upgradeResponse.status, 400);
+      assert.match(upgradeHtml, /Question preview failed/);
+      assert.match(
+        String(consoleError.mock.calls[1]?.[0]),
+        /the "full" render mode is unavailable/,
+      );
+
+      const narrowedResponse = await fetch(
+        `${baseUrl}/questions/demo/example?render-mode=question-only&variant=1`,
+      );
+
+      assert.equal(narrowedResponse.status, 200);
+      assert.lengthOf(renderCalls, 2);
+    } finally {
+      consoleError.mockRestore();
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('narrows individual pages through the render-mode query parameter on a full server', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: unknown[] = [];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push({ renderMode: input.renderMode, submission: input.submission });
+          return testSuccessDocument('<p>Query render mode body</p>');
+        },
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+
+      const narrowed = await fetch(
+        `${baseUrl}/questions/demo/example?render-mode=question-only&variant=1`,
+      );
+      assert.equal(narrowed.status, 200);
+
+      const explicitFull = await fetch(`${baseUrl}/questions/demo/example?render-mode=full`);
+      assert.equal(explicitFull.status, 200);
+
+      const invalid = await fetch(`${baseUrl}/questions/demo/example?render-mode=bogus`);
+      const invalidHtml = await invalid.text();
+      assert.equal(invalid.status, 400);
+      assert.match(invalidHtml, /Question preview failed/);
+      assert.match(String(consoleError.mock.calls[0]?.[0]), /invalid render-mode query parameter/);
+
+      const narrowedPost = await fetch(
+        `${baseUrl}/questions/demo/example?render-mode=question-only`,
+        {
+          body: new URLSearchParams({ __action: 'grade', ans: '42' }),
+          method: 'POST',
+        },
+      );
+      assert.equal(narrowedPost.status, 405);
+      assert.match(
+        String(consoleError.mock.calls[1]?.[0]),
+        /grading is disabled in question-only render mode/,
+      );
+
+      assert.deepEqual(renderCalls, [
+        { renderMode: 'question-only', submission: undefined },
+        { renderMode: 'full', submission: undefined },
+      ]);
+    } finally {
+      consoleError.mockRestore();
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('returns generic HTML errors for posted answers on failed renders and invalid qids', async () => {
     const courseDir = await makeTempCourse();
     const renderCalls: unknown[] = [];
@@ -1524,8 +1651,20 @@ describe('question preview server direct preview route', () => {
       assert.equal(response.status, 200);
       assert.match(html, /^<!doctype html>/i);
       assert.match(html, /Runtime direct preview body/);
-      assert.match(html, /class="question-container"/);
+      assert.match(html, /class="question-container mb-4"/);
+      assert.match(html, /<h1>\s*Runtime direct preview\s*<\/h1>/);
       nodeAssert.doesNotMatch(html, /New Variant|Question ID|Variant:/i);
+
+      const narrowed = await fetch(
+        `${serverUrl(started)}/questions/runtime/simple?variant=1&render-mode=question-only`,
+      );
+      const narrowedHtml = await narrowed.text();
+
+      assert.equal(narrowed.status, 200);
+      assert.match(narrowedHtml, /Runtime direct preview body/);
+      assert.match(narrowedHtml, /class="question-container"/);
+      nodeAssert.doesNotMatch(narrowedHtml, /question-form/);
+      nodeAssert.doesNotMatch(narrowedHtml, /question-block/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -1569,8 +1708,11 @@ describe('question preview server direct preview route', () => {
 
       assert.equal(correct.status, 200);
       assert.match(correctHtml, /data-testid="submission-block"/);
+      assert.match(correctHtml, /data-testid="submission-with-feedback"/);
       assert.match(correctHtml, /text-bg-success/);
       assert.match(correctHtml, /100%/);
+      assert.match(correctHtml, /class="card mb-3 grading-block"/);
+      assert.match(correctHtml, /Correct answer/);
 
       const wrong = await fetch(previewUrl, {
         body: new URLSearchParams({ __action: 'grade', ans: '3' }),
@@ -1588,7 +1730,8 @@ describe('question preview server direct preview route', () => {
 
       assert.equal(refreshed.status, 200);
       nodeAssert.doesNotMatch(refreshedHtml, /submission-block/);
-      assert.match(refreshedHtml, /Check answer/);
+      assert.match(refreshedHtml, /Save &amp; Grade/);
+      assert.match(refreshedHtml, /class="card mb-3 grading-block d-none"/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
