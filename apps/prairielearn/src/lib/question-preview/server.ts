@@ -575,6 +575,7 @@ export async function startQuestionPreviewServer({
           path.join(os.tmpdir(), 'pl-preview-workspaces-'),
         ));
       workspaceManager = createWorkspaceManager({
+        containerNetwork: workspaceOptions.workspaceNetwork,
         courseDir: options.courseDir,
         homeRoot,
         idleTimeoutMs: workspaceOptions.workspaceIdleTimeoutMs,

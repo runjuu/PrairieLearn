@@ -17,6 +17,7 @@ import {
   LocalPreviewWorkspaces,
   type PreviewWorkspaceSettings,
   type PreviewWorkspaceSpec,
+  type PreviewWorkspaceTarget,
 } from './workspace-registry.js';
 
 const PREVIEW_WORKSPACE_CONTAINER_LABEL = 'com.prairielearn.preview-workspace';
@@ -37,10 +38,13 @@ export interface PreviewWorkspaceContainerCreateOptions {
   HostConfig: {
     Binds: string[];
     NetworkMode: string;
-    PortBindings: Record<string, { HostIp: string; HostPort: string }[]>;
+    PortBindings?: Record<string, { HostIp: string; HostPort: string }[]>;
   };
   Image: string;
   Labels: Record<string, string>;
+  NetworkingConfig?: {
+    EndpointsConfig: Record<string, { Aliases: string[] }>;
+  };
 }
 
 interface PreviewWorkspaceContainer {
@@ -97,6 +101,7 @@ export interface PreviewWorkspaceAllocator {
 }
 
 export interface PreviewWorkspaceManagerOptions {
+  containerNetwork?: string;
   courseDir: string;
   docker?: PreviewWorkspaceDockerClient;
   fetchFn?: PreviewWorkspaceFetch;
@@ -122,7 +127,7 @@ export interface PreviewWorkspaceManager extends PreviewWorkspaceAllocator {
   reboot(id: string): Promise<void>;
   requestLaunch(id: string): Promise<void>;
   reset(id: string): Promise<void>;
-  resolveContainerTarget(id: string): { hostPort: number; rewriteUrl: boolean } | null;
+  resolveContainerTarget(id: string): { host: string; port: number; rewriteUrl: boolean } | null;
   sweepIdle(): Promise<void>;
   workspaces: LocalPreviewWorkspaces;
 }
@@ -249,7 +254,10 @@ function makeEnvironment({
   containerUrl: string;
   settings: PreviewWorkspaceSettings;
 }): string[] {
-  const environment: Record<string, string | null> = { ...settings.environment , WORKSPACE_BASE_URL: containerUrl,};
+  const environment: Record<string, string | null> = {
+    ...settings.environment,
+    WORKSPACE_BASE_URL: containerUrl,
+  };
   if (!settings.enableNetworking) environment.WORKSPACE_NETWORKING_DISABLED = '1';
 
   return Object.entries(environment).map(([name, value]) =>
@@ -266,6 +274,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   readonly workspaces: LocalPreviewWorkspaces;
 
   private closed = false;
+  private readonly containerNetwork: string | undefined;
   private readonly containers = new Map<string, OwnedContainer>();
   private readonly courseDir: string;
   private readonly docker: PreviewWorkspaceDockerClient;
@@ -285,6 +294,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   private readonly startTimeoutMs: number;
 
   constructor(options: PreviewWorkspaceManagerOptions) {
+    this.containerNetwork = options.containerNetwork;
     this.courseDir = options.courseDir;
     this.docker = options.docker ?? new Docker();
     this.fetchFn = options.fetchFn ?? fetch;
@@ -335,9 +345,9 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
 
   resolveContainerTarget(id: string) {
     const entry = this.workspaces.get(id);
-    if (entry?.state !== 'running' || entry.hostPort == null) return null;
+    if (entry?.state !== 'running' || entry.target == null) return null;
 
-    return { hostPort: entry.hostPort, rewriteUrl: entry.spec.settings.rewriteUrl };
+    return { ...entry.target, rewriteUrl: entry.spec.settings.rewriteUrl };
   }
 
   requestLaunch(id: string): Promise<void> {
@@ -494,18 +504,30 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     }
 
     if (!step('Creating container.')) return;
-    const container = await this.docker.createContainer({
+    const network = this.containerNetwork;
+    const alias = `pl-workspace-${id}-${version}`;
+
+    const hostConfig: PreviewWorkspaceContainerCreateOptions['HostConfig'] = {
+      Binds: [`${homeDir}:${containerHome}`],
+      NetworkMode: network ?? 'bridge',
+    };
+    // Native path: publish the container port on the host loopback so the
+    // proxy can reach it at 127.0.0.1. Shared-network path: publish nothing;
+    // the proxy reaches the container by its network alias instead.
+    if (network == null) {
+      hostConfig.PortBindings = {
+        [`${containerPort}/tcp`]: [{ HostIp: '127.0.0.1', HostPort: '' }],
+      };
+    }
+
+    const createOptions: PreviewWorkspaceContainerCreateOptions = {
       Cmd: spec.settings.args == null ? undefined : shlexSplit(spec.settings.args),
       Env: makeEnvironment({
         containerUrl: this.workspaces.containerUrl(id),
         settings: spec.settings,
       }),
       ExposedPorts: { [`${containerPort}/tcp`]: {} },
-      HostConfig: {
-        Binds: [`${homeDir}:${containerHome}`],
-        NetworkMode: 'bridge',
-        PortBindings: { [`${containerPort}/tcp`]: [{ HostIp: '127.0.0.1', HostPort: '' }] },
-      },
+      HostConfig: hostConfig,
       Image: spec.settings.image,
       Labels: {
         [PREVIEW_WORKSPACE_CONTAINER_LABEL]: 'true',
@@ -514,7 +536,14 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
         [PREVIEW_WORKSPACE_PID_LABEL]: String(this.pid),
         [PREVIEW_WORKSPACE_VERSION_LABEL]: String(version),
       },
-    });
+    };
+    if (network != null) {
+      createOptions.NetworkingConfig = {
+        EndpointsConfig: { [network]: { Aliases: [alias] } },
+      };
+    }
+
+    const container = await this.docker.createContainer(createOptions);
     if (this.workspaces.get(id)?.launchGeneration !== generation) {
       // Superseded while the container was being created; it was never
       // registered, so remove it directly.
@@ -533,19 +562,25 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     }
     await container.start();
 
-    const inspectInfo = await container.inspect();
-    const hostPort = Number(
-      inspectInfo.NetworkSettings.Ports[`${containerPort}/tcp`]?.[0]?.HostPort,
-    );
-    if (!Number.isInteger(hostPort) || hostPort <= 0) {
-      throw new Error('Docker did not assign a host port to the workspace container.');
+    let target: PreviewWorkspaceTarget;
+    if (network != null) {
+      target = { host: alias, port: containerPort };
+    } else {
+      const inspectInfo = await container.inspect();
+      const hostPort = Number(
+        inspectInfo.NetworkSettings.Ports[`${containerPort}/tcp`]?.[0]?.HostPort,
+      );
+      if (!Number.isInteger(hostPort) || hostPort <= 0) {
+        throw new Error('Docker did not assign a host port to the workspace container.');
+      }
+      target = { host: '127.0.0.1', port: hostPort };
     }
 
     if (!step('Waiting for the workspace to respond.')) {
       await this.teardownContainer(id, generation);
       return;
     }
-    const healthy = await this.waitForServer(id, generation, hostPort);
+    const healthy = await this.waitForServer(id, generation, target);
     if (!healthy) {
       await this.teardownContainer(id, generation);
       return;
@@ -553,9 +588,9 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
 
     if (
       !this.workspaces.transition(id, generation, {
-        hostPort,
         message: 'Workspace is running.',
         state: 'running',
+        target,
       })
     ) {
       await this.teardownContainer(id, generation);
@@ -629,12 +664,12 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   }
 
   /** Returns false when the launch was superseded while waiting. */
-  private async waitForServer(id: string, generation: number, hostPort: number) {
+  private async waitForServer(id: string, generation: number, target: PreviewWorkspaceTarget) {
     const startTime = this.now();
 
     for (;;) {
       try {
-        await this.fetchFn(`http://127.0.0.1:${hostPort}/`, {
+        await this.fetchFn(`http://${target.host}:${target.port}/`, {
           signal: AbortSignal.timeout(this.healthCheckTimeoutMs),
         });
         // Any response means the workspace server is up; strange status codes

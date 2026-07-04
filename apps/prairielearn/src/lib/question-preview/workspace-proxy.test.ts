@@ -8,12 +8,12 @@ import { type PreviewWorkspaceProxyTargets, makePreviewWorkspaceProxy } from './
 
 interface FakeTargets extends PreviewWorkspaceProxyTargets {
   heartbeats: string[];
-  targetsById: Map<string, { hostPort: number; rewriteUrl: boolean }>;
+  targetsById: Map<string, { host: string; port: number; rewriteUrl: boolean }>;
 }
 
 function makeFakeTargets(): FakeTargets {
   const heartbeats: string[] = [];
-  const targetsById = new Map<string, { hostPort: number; rewriteUrl: boolean }>();
+  const targetsById = new Map<string, { host: string; port: number; rewriteUrl: boolean }>();
 
   return {
     heartbeat(id) {
@@ -107,7 +107,7 @@ describe('preview workspace proxy', () => {
   });
 
   it('proxies container requests with the prefix stripped when rewriteUrl is enabled', async () => {
-    targets.targetsById.set('1', { hostPort: containerPort, rewriteUrl: true });
+    targets.targetsById.set('1', { host: '127.0.0.1', port: containerPort, rewriteUrl: true });
 
     const { body, status } = await fetchText(previewPort, '/workspace/1/container/some/path?q=1');
 
@@ -117,7 +117,7 @@ describe('preview workspace proxy', () => {
   });
 
   it('preserves the full path when rewriteUrl is disabled', async () => {
-    targets.targetsById.set('1', { hostPort: containerPort, rewriteUrl: false });
+    targets.targetsById.set('1', { host: '127.0.0.1', port: containerPort, rewriteUrl: false });
 
     const { body, status } = await fetchText(previewPort, '/workspace/1/container/some/path');
 
@@ -140,7 +140,7 @@ describe('preview workspace proxy', () => {
   });
 
   it('strips sensitive cookies before requests reach the container', async () => {
-    targets.targetsById.set('1', { hostPort: containerPort, rewriteUrl: true });
+    targets.targetsById.set('1', { host: '127.0.0.1', port: containerPort, rewriteUrl: true });
 
     const { body } = await fetchText(previewPort, '/workspace/1/container/', {
       cookie: 'pl_authn=secret; pl2_session=secret2; harmless=value',
@@ -151,7 +151,7 @@ describe('preview workspace proxy', () => {
   });
 
   it('tunnels websocket upgrades to the container', async () => {
-    targets.targetsById.set('1', { hostPort: containerPort, rewriteUrl: true });
+    targets.targetsById.set('1', { host: '127.0.0.1', port: containerPort, rewriteUrl: true });
 
     const { head, socket } = await new Promise<{
       head: Buffer;
@@ -199,7 +199,11 @@ describe('preview workspace proxy', () => {
   it('responds with a gateway error when the container is unreachable', async () => {
     const unreachableServer = await startServer(http.createServer());
     await unreachableServer.close();
-    targets.targetsById.set('1', { hostPort: unreachableServer.port, rewriteUrl: true });
+    targets.targetsById.set('1', {
+      host: '127.0.0.1',
+      port: unreachableServer.port,
+      rewriteUrl: true,
+    });
 
     const { body, status } = await fetchText(previewPort, '/workspace/1/container/');
 

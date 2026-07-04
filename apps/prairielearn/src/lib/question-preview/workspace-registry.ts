@@ -31,22 +31,33 @@ export interface PreviewWorkspaceFileGenerationError {
   msg: string;
 }
 
+/**
+ * Where the container proxy and health check should reach a running
+ * workspace. On the host-published path this is `127.0.0.1` plus the
+ * dynamically assigned host port; on the shared-network path it is the
+ * container's network alias plus its internal port.
+ */
+export interface PreviewWorkspaceTarget {
+  host: string;
+  port: number;
+}
+
 export interface PreviewWorkspaceEntry {
   fileGenerationErrors: PreviewWorkspaceFileGenerationError[];
-  hostPort: number | null;
   id: string;
   lastActivityAt: number;
   launchGeneration: number;
   message: string;
   spec: PreviewWorkspaceSpec;
   state: PreviewWorkspaceState;
+  target: PreviewWorkspaceTarget | null;
   version: number;
 }
 
 export interface PreviewWorkspaceUpdate {
-  hostPort?: number | null;
   message?: string;
   state?: PreviewWorkspaceState;
+  target?: PreviewWorkspaceTarget | null;
 }
 
 function workspaceKey(qid: string, variantSeed: string) {
@@ -91,13 +102,13 @@ export class LocalPreviewWorkspaces {
     const id = String(this.nextWorkspaceId++);
     this.entriesById.set(id, {
       fileGenerationErrors: [],
-      hostPort: null,
       id,
       lastActivityAt: this.now(),
       launchGeneration: 0,
       message: '',
       spec,
       state: 'uninitialized',
+      target: null,
       version: 1,
     });
     this.idsByKey.set(key, id);
@@ -135,7 +146,7 @@ export class LocalPreviewWorkspaces {
     entry.launchGeneration += 1;
     entry.state = 'launching';
     entry.message = 'Launching workspace.';
-    entry.hostPort = null;
+    entry.target = null;
     entry.lastActivityAt = this.now();
 
     return { generation: entry.launchGeneration };
@@ -205,9 +216,9 @@ export class LocalPreviewWorkspaces {
   private applyUpdate(entry: PreviewWorkspaceEntry, update: PreviewWorkspaceUpdate) {
     if (update.state != null) {
       entry.state = update.state;
-      if (update.state !== 'running') entry.hostPort = null;
+      if (update.state !== 'running') entry.target = null;
     }
-    if (update.hostPort !== undefined) entry.hostPort = update.hostPort;
+    if (update.target !== undefined) entry.target = update.target;
     if (update.message != null) entry.message = update.message;
     entry.lastActivityAt = this.now();
   }

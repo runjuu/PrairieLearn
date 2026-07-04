@@ -49,6 +49,12 @@ Optional flags:
   starting. Defaults to `60000`.
 - `--workspace-max-containers`: Maximum number of concurrently running workspace containers; the
   least recently used workspace is stopped to make room. Defaults to `3`.
+- `--workspace-network`: Name of an existing user-defined Docker network to attach workspace
+  containers to. By default, containers run on Docker's default bridge network and publish their
+  port on the host loopback, which is right when the preview server runs natively. Set this when
+  the preview server itself runs inside Docker (for example in a devcontainer): attach the server
+  container and workspace containers to the same network, and the proxy reaches workspaces by
+  network alias instead of a published host port.
 - `--workspace-pull-policy`: When to pull workspace images, one of `missing`, `always`, or
   `never`. Defaults to `missing`.
 

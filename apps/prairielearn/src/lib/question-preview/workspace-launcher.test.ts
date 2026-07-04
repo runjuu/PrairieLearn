@@ -307,10 +307,12 @@ describe('preview workspace manager', () => {
 
     const entry = manager.workspaces.get(workspaceId);
     assert.equal(entry?.state, 'running');
-    assert.equal(entry?.hostPort, 40100);
+    assert.deepEqual(entry?.target, { host: '127.0.0.1', port: 40100 });
 
     const container = docker.containers[0];
     assert.isTrue(container.started);
+    assert.equal(container.options.HostConfig.NetworkMode, 'bridge');
+    assert.isUndefined(container.options.NetworkingConfig);
     assert.deepEqual(container.options.Cmd, ['--port', '8080']);
     assert.includeMembers(container.options.Env, [
       'GREETING=hi',
@@ -327,9 +329,35 @@ describe('preview workspace manager', () => {
     assert.equal(container.options.Labels['com.prairielearn.preview-workspace'], 'true');
     assert.equal(container.options.Labels['com.prairielearn.preview-workspace.id'], workspaceId);
 
-    assert.equal(manager.resolveContainerTarget(workspaceId)?.hostPort, 40100);
+    assert.deepEqual(manager.resolveContainerTarget(workspaceId), {
+      host: '127.0.0.1',
+      port: 40100,
+      rewriteUrl: true,
+    });
     const homeDir = path.join(tempDir, 'homes', `workspace-${workspaceId}-1`, 'current');
     assert.equal(await fs.readFile(path.join(homeDir, 'starter.txt'), 'utf8'), 'starter contents');
+  });
+
+  it('attaches the workspace to a shared network and targets it by alias', async () => {
+    const manager = makeManager({ containerNetwork: 'pl-preview-net' });
+    const { workspaceId } = manager.ensureWorkspace(makeSpec());
+
+    await manager.requestLaunch(workspaceId);
+
+    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+
+    const container = docker.containers[0];
+    assert.equal(container.options.HostConfig.NetworkMode, 'pl-preview-net');
+    assert.isUndefined(container.options.HostConfig.PortBindings);
+    assert.deepEqual(container.options.NetworkingConfig, {
+      EndpointsConfig: { 'pl-preview-net': { Aliases: [`pl-workspace-${workspaceId}-1`] } },
+    });
+
+    assert.deepEqual(manager.resolveContainerTarget(workspaceId), {
+      host: `pl-workspace-${workspaceId}-1`,
+      port: 8080,
+      rewriteUrl: true,
+    });
   });
 
   it('resolves home and port from image labels when unset in the question', async () => {

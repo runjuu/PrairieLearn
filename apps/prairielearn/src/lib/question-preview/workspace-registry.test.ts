@@ -43,13 +43,16 @@ describe('local preview workspaces', () => {
     const { workspaceId } = workspaces.ensureWorkspace(makeSpec());
     const launch = workspaces.beginLaunch(workspaceId);
     assert.isNotNull(launch);
-    workspaces.transition(workspaceId, launch.generation, { hostPort: 40100, state: 'running' });
+    workspaces.transition(workspaceId, launch.generation, {
+      state: 'running',
+      target: { host: '127.0.0.1', port: 40100 },
+    });
 
     workspaces.ensureWorkspace(makeSpec({ params: { starter: 'edited' } }));
 
     const entry = workspaces.get(workspaceId);
     assert.equal(entry?.state, 'running');
-    assert.equal(entry?.hostPort, 40100);
+    assert.deepEqual(entry?.target, { host: '127.0.0.1', port: 40100 });
     assert.deepEqual(entry?.spec.params, { starter: 'edited' });
   });
 
@@ -62,7 +65,10 @@ describe('local preview workspaces', () => {
     assert.equal(workspaces.get(workspaceId)?.state, 'launching');
 
     assert.isNull(workspaces.beginLaunch(workspaceId));
-    workspaces.transition(workspaceId, launch.generation, { hostPort: 40100, state: 'running' });
+    workspaces.transition(workspaceId, launch.generation, {
+      state: 'running',
+      target: { host: '127.0.0.1', port: 40100 },
+    });
     assert.isNull(workspaces.beginLaunch(workspaceId));
   });
 
@@ -74,26 +80,29 @@ describe('local preview workspaces', () => {
 
     workspaces.forceState(workspaceId, { message: 'Workspace stopped.', state: 'stopped' });
     const applied = workspaces.transition(workspaceId, staleLaunch.generation, {
-      hostPort: 40100,
       state: 'running',
+      target: { host: '127.0.0.1', port: 40100 },
     });
 
     assert.isFalse(applied);
     const entry = workspaces.get(workspaceId);
     assert.equal(entry?.state, 'stopped');
-    assert.isNull(entry?.hostPort);
+    assert.isNull(entry?.target);
   });
 
-  it('clears the host port when a workspace leaves the running state', () => {
+  it('clears the container target when a workspace leaves the running state', () => {
     const workspaces = new LocalPreviewWorkspaces();
     const { workspaceId } = workspaces.ensureWorkspace(makeSpec());
     const launch = workspaces.beginLaunch(workspaceId);
     assert.isNotNull(launch);
-    workspaces.transition(workspaceId, launch.generation, { hostPort: 40100, state: 'running' });
+    workspaces.transition(workspaceId, launch.generation, {
+      state: 'running',
+      target: { host: '127.0.0.1', port: 40100 },
+    });
 
     workspaces.forceState(workspaceId, { state: 'stopped' });
 
-    assert.isNull(workspaces.get(workspaceId)?.hostPort);
+    assert.isNull(workspaces.get(workspaceId)?.target);
   });
 
   it('bumps the version and discards file errors on reset', () => {
@@ -122,7 +131,10 @@ describe('local preview workspaces', () => {
       const launch = workspaces.beginLaunch(workspaceId);
       assert.isNotNull(launch);
       currentTime += 1_000;
-      workspaces.transition(workspaceId, launch.generation, { hostPort: 40100, state: 'running' });
+      workspaces.transition(workspaceId, launch.generation, {
+        state: 'running',
+        target: { host: '127.0.0.1', port: 40100 },
+      });
     }
 
     assert.equal(workspaces.leastRecentlyActiveRunning()?.id, first.workspaceId);
