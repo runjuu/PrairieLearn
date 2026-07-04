@@ -13,7 +13,7 @@ export interface LocalPreviewVariantIdentity {
   readonly id: string;
 }
 
-export interface QuestionPreviewGeneratedFileIssue {
+interface QuestionPreviewGeneratedFileIssue {
   data?: unknown;
   fatal: boolean;
   message: string;

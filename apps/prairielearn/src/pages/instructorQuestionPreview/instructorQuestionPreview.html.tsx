@@ -2,14 +2,11 @@ import assert from 'node:assert';
 
 import { html, unsafeHtml } from '@prairielearn/html';
 
-import {
-  CalculatorDrawer,
-  CalculatorDrawerToggle,
-} from '../../components/CalculatorDrawer.js';
+import { CalculatorDrawer, CalculatorDrawerToggle } from '../../components/CalculatorDrawer.js';
 import { InstructorInfoPanel } from '../../components/InstructorInfoPanel.js';
 import { PageLayout } from '../../components/PageLayout.js';
-import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { QuestionContainer } from '../../components/QuestionContainer.js';
+import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { type CopyTarget } from '../../lib/copy-content.js';
 import type { ResLocalsQuestionRender } from '../../lib/question-render.types.js';
 import type { ResLocalsForPage } from '../../lib/res-locals.js';
