@@ -9,16 +9,26 @@ import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import * as questionServers from '../../question-servers/index.js';
 import { type QuestionJson, QuestionJsonSchema } from '../../schemas/index.js';
 import { config } from '../config.js';
-import type { Question, Variant } from '../db-types.js';
+import type { Question, Submission, Variant } from '../db-types.js';
 
 import { makeQuestionPreviewAssetUrls } from './assets.js';
 import { type LocalPreviewGeneratedFiles } from './generated-files.js';
 import type { QuestionPreviewQid } from './qid.js';
-import { makeLocalPreviewQuestionRows, makeLocalPreviewVariant } from './rows.js';
+import {
+  makeLocalPreviewQuestionRows,
+  makeLocalPreviewSubmission,
+  makeLocalPreviewVariant,
+} from './rows.js';
+
+export interface QuestionPreviewSubmissionInput {
+  /** Posted form fields with `__action`/`__csrf_token`/`__variant_id` already stripped. */
+  rawSubmittedAnswer: Record<string, unknown>;
+}
 
 export interface QuestionPreviewDocumentInput {
   qid: QuestionPreviewQid;
   variantSeed?: string;
+  submission?: QuestionPreviewSubmissionInput;
 }
 
 export interface QuestionPreviewDocumentRenderer {
@@ -31,7 +41,14 @@ export interface QuestionPreviewDocumentRendererOptions {
   urlPrefix: string;
 }
 
-export type QuestionPreviewPhase = 'input' | 'metadata' | 'generate' | 'prepare' | 'render';
+export type QuestionPreviewPhase =
+  | 'input'
+  | 'metadata'
+  | 'generate'
+  | 'prepare'
+  | 'parse'
+  | 'grade'
+  | 'render';
 
 export interface QuestionPreviewDiagnostic {
   data?: unknown;
@@ -175,6 +192,8 @@ function isQuestionPreviewPhase(value: unknown): value is QuestionPreviewPhase {
     value === 'metadata' ||
     value === 'generate' ||
     value === 'prepare' ||
+    value === 'parse' ||
+    value === 'grade' ||
     value === 'render'
   );
 }
@@ -197,14 +216,75 @@ function renderQuestionPreviewShellHeadHtml({
   `.toString();
 }
 
+type QuestionPreviewSubmissionPanel =
+  | {
+      kind: 'graded';
+      gradable: boolean;
+      manualFeedback: string | null;
+      score: number | null;
+      submissionHtml: string;
+    }
+  | { kind: 'unsupported-grading-method'; gradingMethod: Question['grading_method'] };
+
+function renderSubmissionStatusBadge({
+  gradable,
+  score,
+}: {
+  gradable: boolean;
+  score: number | null;
+}) {
+  if (!gradable) return html`<span class="badge text-bg-danger">invalid, not gradable</span>`;
+  if (score == null) return html`<span class="badge text-bg-secondary">not graded</span>`;
+
+  const percentage = `${Math.floor(score * 100)}%`;
+  if (score >= 1) return html`<span class="badge text-bg-success">${percentage}</span>`;
+  if (score > 0) return html`<span class="badge text-bg-warning">${percentage}</span>`;
+  return html`<span class="badge text-bg-danger">${percentage}</span>`;
+}
+
+function renderQuestionPreviewSubmissionPanelHtml(submissionPanel: QuestionPreviewSubmissionPanel) {
+  if (submissionPanel.kind === 'unsupported-grading-method') {
+    return html`
+      <div class="alert alert-secondary" role="alert">
+        This question uses ${submissionPanel.gradingMethod} grading, which is not supported by the
+        local preview server. Only internally graded questions can be checked here.
+      </div>
+    `;
+  }
+
+  return html`
+    <div class="card mb-4 submission-panel" data-testid="submission-block">
+      <div class="card-header bg-light d-flex align-items-center gap-2">
+        <h2 class="h6 fw-normal mb-0">Submitted answer</h2>
+        ${renderSubmissionStatusBadge(submissionPanel)}
+      </div>
+      <div class="card-body overflow-x-auto submission-body">
+        ${unsafeHtml(submissionPanel.submissionHtml)}
+      </div>
+      ${submissionPanel.manualFeedback == null
+        ? ''
+        : html`
+            <div class="card-footer">
+              <h3 class="h6">Feedback</h3>
+              <p class="mb-0" style="white-space: pre-wrap;">${submissionPanel.manualFeedback}</p>
+            </div>
+          `}
+    </div>
+  `;
+}
+
 function renderQuestionPreviewBodyHtml({
+  checkAnswerSupported,
   question,
   questionHtml,
+  submissionPanel,
   variant,
   variantToken,
 }: {
+  checkAnswerSupported: boolean;
   question: Question;
   questionHtml: string;
+  submissionPanel: QuestionPreviewSubmissionPanel | null;
   variant: Variant;
   variantToken: string;
 }): string {
@@ -218,7 +298,26 @@ function renderQuestionPreviewBodyHtml({
     >
       <form class="question-form" name="question-form" method="POST" autocomplete="off">
         <div class="question-body">${unsafeHtml(questionHtml)}</div>
+        ${checkAnswerSupported
+          ? html`
+              <div class="mt-3">
+                <button
+                  type="submit"
+                  class="btn btn-primary question-grade"
+                  name="__action"
+                  value="grade"
+                >
+                  Check answer
+                </button>
+              </div>
+            `
+          : html`
+              <p class="small text-muted mt-3 mb-0">
+                Check answer is unavailable: this question uses ${question.grading_method} grading.
+              </p>
+            `}
       </form>
+      ${submissionPanel == null ? '' : renderQuestionPreviewSubmissionPanelHtml(submissionPanel)}
     </div>
   `.toString();
 }
@@ -337,6 +436,7 @@ async function renderQuestionPreviewDocumentResult({
   courseDir,
   localPreviewGeneratedFiles,
   qid,
+  submission: submissionInput,
   urlPrefix,
   variantSeed = '1',
 }: QuestionPreviewInternalRenderInput): Promise<QuestionPreviewDocumentResult> {
@@ -424,6 +524,97 @@ async function renderQuestionPreviewDocumentResult({
       identity: localPreviewVariantIdentity,
     });
 
+    const checkAnswerSupported = question.grading_method === 'Internal';
+    const submissionDiagnostics: QuestionPreviewDiagnostic[] = [];
+    let submission: Submission | null = null;
+    let unsupportedGradingMethod = false;
+
+    if (submissionInput != null) {
+      if (!checkAnswerSupported) {
+        unsupportedGradingMethod = true;
+      } else {
+        phase = 'parse';
+        const rawSubmittedAnswer = submissionInput.rawSubmittedAnswer;
+        const parseResult = await questionServer.parse(
+          {
+            submitted_answer: rawSubmittedAnswer,
+            raw_submitted_answer: rawSubmittedAnswer,
+            gradable: true,
+          },
+          preparedVariant,
+          question,
+          course,
+          caller,
+        );
+        submissionDiagnostics.push(
+          ...diagnosticsFromIssues(parseResult.courseIssues, 'parse', { sanitizePaths }),
+        );
+        if (parseResult.courseIssues.some((issue) => issue.fatal)) {
+          return makeQuestionPreviewDocumentFailureResult([
+            ...generateDiagnostics,
+            ...prepareDiagnostics,
+            ...submissionDiagnostics,
+          ]);
+        }
+
+        // `params` and `true_answer` may legitimately change during `parse()`,
+        // so carry them onto the variant like the full app persists them.
+        preparedVariant.params = parseResult.data.params;
+        preparedVariant.true_answer = parseResult.data.true_answer;
+        submission = makeLocalPreviewSubmission(preparedVariant, {
+          broken: false,
+          feedback: parseResult.data.feedback,
+          format_errors: parseResult.data.format_errors,
+          gradable: parseResult.data.gradable,
+          params: parseResult.data.params,
+          partial_scores: null,
+          raw_submitted_answer: parseResult.data.raw_submitted_answer,
+          score: null,
+          submitted_answer: parseResult.data.submitted_answer,
+          true_answer: parseResult.data.true_answer,
+        });
+
+        if (submission.gradable) {
+          phase = 'grade';
+          const gradeResult = await questionServer.grade(
+            submission,
+            preparedVariant,
+            question,
+            course,
+            caller,
+          );
+          submissionDiagnostics.push(
+            ...diagnosticsFromIssues(gradeResult.courseIssues, 'grade', { sanitizePaths }),
+          );
+          if (gradeResult.courseIssues.some((issue) => issue.fatal)) {
+            return makeQuestionPreviewDocumentFailureResult([
+              ...generateDiagnostics,
+              ...prepareDiagnostics,
+              ...submissionDiagnostics,
+            ]);
+          }
+
+          preparedVariant.params = gradeResult.data.params ?? preparedVariant.params;
+          preparedVariant.true_answer = gradeResult.data.true_answer ?? preparedVariant.true_answer;
+          submission = makeLocalPreviewSubmission(preparedVariant, {
+            broken: false,
+            feedback: gradeResult.data.feedback ?? {},
+            format_errors: gradeResult.data.format_errors ?? {},
+            gradable: gradeResult.data.gradable ?? false,
+            params: preparedVariant.params,
+            partial_scores: gradeResult.data.partial_scores ?? {},
+            raw_submitted_answer: gradeResult.data.raw_submitted_answer ?? {},
+            score: gradeResult.data.score ?? 0,
+            submitted_answer: gradeResult.data.submitted_answer ?? {},
+            true_answer: preparedVariant.true_answer,
+            v2_score: gradeResult.data.v2_score,
+          });
+        }
+
+        preparedVariant.num_tries = submission.gradable ? 1 : 0;
+      }
+    }
+
     phase = 'render';
     const renderResult = await questionServer.render({
       course,
@@ -434,9 +625,9 @@ async function renderQuestionPreviewDocumentResult({
         urlPrefix,
       }),
       question,
-      renderSelection: { question: true },
-      submission: null,
-      submissions: [],
+      renderSelection: { question: true, submissions: submission != null },
+      submission,
+      submissions: submission == null ? [] : [submission],
       variant: preparedVariant,
       caller,
     });
@@ -447,9 +638,23 @@ async function renderQuestionPreviewDocumentResult({
       return makeQuestionPreviewDocumentFailureResult([
         ...generateDiagnostics,
         ...prepareDiagnostics,
+        ...submissionDiagnostics,
         ...renderDiagnostics,
       ]);
     }
+
+    const submissionPanel: QuestionPreviewSubmissionPanel | null = unsupportedGradingMethod
+      ? { kind: 'unsupported-grading-method', gradingMethod: question.grading_method }
+      : submission == null
+        ? null
+        : {
+            kind: 'graded',
+            gradable: submission.gradable === true,
+            manualFeedback:
+              typeof submission.feedback?.manual === 'string' ? submission.feedback.manual : null,
+            score: submission.score,
+            submissionHtml: renderResult.data.submissionHtmls[0] ?? '',
+          };
 
     const extraHeadersHtml = renderResult.data.extraHeadersHtml;
     const shellHeadHtml = renderQuestionPreviewShellHeadHtml({
@@ -458,8 +663,10 @@ async function renderQuestionPreviewDocumentResult({
       urlPrefix,
     });
     const bodyHtml = renderQuestionPreviewBodyHtml({
+      checkAnswerSupported,
       question,
       questionHtml: renderResult.data.questionHtml,
+      submissionPanel,
       variant: preparedVariant,
       variantToken: generateSignedToken(
         { variantId: preparedVariant.id.toString() },
@@ -469,7 +676,12 @@ async function renderQuestionPreviewDocumentResult({
 
     return makeQuestionPreviewSuccessResult({
       bodyHtml,
-      diagnostics: [...generateDiagnostics, ...prepareDiagnostics, ...renderDiagnostics],
+      diagnostics: [
+        ...generateDiagnostics,
+        ...prepareDiagnostics,
+        ...submissionDiagnostics,
+        ...renderDiagnostics,
+      ],
       headHtml: shellHeadHtml,
     });
   } catch (err) {
@@ -490,6 +702,7 @@ export function createQuestionPreviewDocumentRenderer({
         courseDir: resolvedCourseDir,
         localPreviewGeneratedFiles,
         qid: input.qid,
+        submission: input.submission,
         urlPrefix,
         variantSeed: input.variantSeed,
       });
