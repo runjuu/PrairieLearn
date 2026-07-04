@@ -57,14 +57,14 @@ export function makeQuestionPreviewAssetUrls({
   };
 }
 
-export function isPathInsideRoot(root: string, filePath: string) {
+function isPathInsideRoot(root: string, filePath: string) {
   const relativePath = path.relative(root, filePath);
   return (
     relativePath.length === 0 || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
   );
 }
 
-export function decodeSafeUrlPathSegments(encodedPath: string) {
+function decodeSafeUrlPathSegments(encodedPath: string) {
   if (encodedPath.length === 0) return null;
 
   const decodedSegments: string[] = [];

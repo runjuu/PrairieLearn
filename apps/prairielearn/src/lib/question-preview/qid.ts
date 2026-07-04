@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-export const QUESTION_PREVIEW_QID_ERROR_MESSAGE =
+const QUESTION_PREVIEW_QID_ERROR_MESSAGE =
   'Invalid question id. Expected a relative qid below the course questions directory.';
 
 const questionPreviewQidBrand: unique symbol = Symbol('QuestionPreviewQid');
