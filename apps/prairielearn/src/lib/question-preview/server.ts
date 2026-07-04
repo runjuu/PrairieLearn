@@ -274,12 +274,10 @@ function makePreviewWorkspacePageUrls(
   entry: PreviewWorkspaceEntry,
 ) {
   const workspaceUrl = workspaceManager.workspaces.workspaceUrl(entry.id);
-  const encodedQid = entry.spec.qid.split('/').map(encodeURIComponent).join('/');
 
   return {
     actionUrl: workspaceUrl,
     containerUrl: workspaceManager.workspaces.containerUrl(entry.id),
-    questionUrl: `/questions/${encodedQid}?variant=${encodeURIComponent(entry.spec.variantSeed)}`,
     statusUrl: `${workspaceUrl}/status`,
   };
 }

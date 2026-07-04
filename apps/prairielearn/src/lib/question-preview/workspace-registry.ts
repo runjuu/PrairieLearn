@@ -145,7 +145,7 @@ export class LocalPreviewWorkspaces {
 
     entry.launchGeneration += 1;
     entry.state = 'launching';
-    entry.message = 'Launching workspace.';
+    entry.message = 'Launching';
     entry.target = null;
     entry.lastActivityAt = this.now();
 

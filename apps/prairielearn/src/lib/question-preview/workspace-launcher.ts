@@ -375,7 +375,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     const entry = this.workspaces.get(id);
     if (entry == null) return;
 
-    this.workspaces.forceState(id, { message: 'Rebooting workspace.', state: 'stopped' });
+    this.workspaces.forceState(id, { message: 'Rebooting', state: 'stopped' });
     await this.teardownContainer(id);
     void this.requestLaunch(id);
   }
@@ -384,7 +384,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     const entry = this.workspaces.get(id);
     if (entry == null) return;
 
-    this.workspaces.forceState(id, { message: 'Workspace reset.', state: 'uninitialized' });
+    this.workspaces.forceState(id, { message: 'Reset', state: 'uninitialized' });
     await this.teardownContainer(id);
     const homeDir = makePreviewWorkspaceHomeDir(this.homeRoot, entry.id, entry.version);
     await fs.rm(path.dirname(homeDir), { force: true, recursive: true });
@@ -432,7 +432,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     await Promise.all(
       this.workspaces.list().map(async (entry) => {
         this.workspaces.forceState(entry.id, {
-          message: 'Preview server stopped.',
+          message: 'Stopped',
           state: 'stopped',
         });
         await this.teardownContainer(entry.id);
@@ -481,7 +481,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
 
     await this.makeRoomForContainer();
 
-    if (!step('Checking image.')) return;
+    if (!step('Checking image')) return;
     const imageLabels = await this.ensureImage(id, generation, spec.settings.image);
     if (imageLabels === false) return;
     const { containerHome, containerPort } = resolveHomeAndPort(spec.settings, imageLabels);
@@ -492,7 +492,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       () => false,
     );
     if (!homeDirExists) {
-      if (!step('Preparing workspace files.')) return;
+      if (!step('Preparing files')) return;
       const { fileGenerationErrors } = await generatePreviewWorkspaceFiles({
         courseDir: this.courseDir,
         homeDir,
@@ -503,7 +503,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       this.workspaces.setFileGenerationErrors(id, fileGenerationErrors);
     }
 
-    if (!step('Creating container.')) return;
+    if (!step('Creating container')) return;
     const network = this.containerNetwork;
     const alias = `pl-workspace-${id}-${version}`;
 
@@ -556,7 +556,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     }
     this.containers.set(id, { container, generation });
 
-    if (!step('Starting container.')) {
+    if (!step('Starting')) {
       await this.teardownContainer(id, generation);
       return;
     }
@@ -576,7 +576,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       target = { host: '127.0.0.1', port: hostPort };
     }
 
-    if (!step('Waiting for the workspace to respond.')) {
+    if (!step('Connecting')) {
       await this.teardownContainer(id, generation);
       return;
     }
@@ -588,7 +588,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
 
     if (
       !this.workspaces.transition(id, generation, {
-        message: 'Workspace is running.',
+        message: 'Running',
         state: 'running',
         target,
       })
@@ -635,7 +635,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
         (event) => {
           const percent = tracker.observe(event);
           if (percent != null) {
-            this.workspaces.transition(id, generation, { message: `Pulling image (${percent}%).` });
+            this.workspaces.transition(id, generation, { message: `Pulling image (${percent}%)` });
           }
         },
       );
