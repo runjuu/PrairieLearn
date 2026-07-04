@@ -1033,7 +1033,6 @@ describe('question preview server direct preview route', () => {
         { method: 'GET', path: '/saved-answer' },
         { method: 'GET', path: '/answer-panel' },
         { method: 'GET', path: '/assessment/1' },
-        { method: 'POST', path: '/questions/demo/example?variant=1' },
       ];
 
       for (const route of absentRoutes) {
@@ -1046,6 +1045,148 @@ describe('question preview server direct preview route', () => {
         nodeAssert.doesNotMatch(body, /Preview only|"ok"|"payload"|"diagnostics"/, route.path);
       }
     } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('checks posted answers through the runtime with metadata fields stripped', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: unknown[] = [];
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push({
+            qid: input.qid.decoded,
+            submission: input.submission,
+            variantSeed: input.variantSeed,
+          });
+          return testSuccessDocument('<p>Graded preview body</p>');
+        },
+      }),
+    });
+
+    try {
+      const response = await fetch(`${serverUrl(started)}/questions/demo/example?variant=2`, {
+        body: new URLSearchParams({
+          __action: 'grade',
+          __csrf_token: 'ignored-token',
+          __variant_id: '9',
+          ans: '42',
+        }),
+        method: 'POST',
+      });
+      const html = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-type') ?? '', /text\/html/);
+      assert.match(html, /Graded preview body/);
+      assert.deepEqual(renderCalls, [
+        {
+          qid: 'demo/example',
+          submission: { rawSubmittedAnswer: { ans: '42' } },
+          variantSeed: '2',
+        },
+      ]);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects posted answers without a grade action before invoking the runtime', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: unknown[] = [];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push(input);
+          return testSuccessDocument('<p>Runtime rendered rejected action</p>');
+        },
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const saveResponse = await fetch(`${baseUrl}/questions/demo/example?variant=1`, {
+        body: new URLSearchParams({ __action: 'save', ans: '42' }),
+        method: 'POST',
+      });
+      const saveHtml = await saveResponse.text();
+
+      assert.equal(saveResponse.status, 400);
+      assert.match(saveHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(saveHtml, /Runtime rendered rejected action/);
+
+      const missingActionResponse = await fetch(`${baseUrl}/questions/demo/example?variant=1`, {
+        body: new URLSearchParams({ ans: '42' }),
+        method: 'POST',
+      });
+
+      assert.equal(missingActionResponse.status, 400);
+      assert.deepEqual(renderCalls, []);
+      assert.equal(consoleError.mock.calls.length, 2);
+      assert.match(String(consoleError.mock.calls[0]?.[0]), /submission rejected/);
+    } finally {
+      consoleError.mockRestore();
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns generic HTML errors for posted answers on failed renders and invalid qids', async () => {
+    const courseDir = await makeTempCourse();
+    const renderCalls: unknown[] = [];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          renderCalls.push(input);
+          return testFailureDocument([
+            {
+              fatal: true,
+              message: 'Submission parse failed',
+              name: 'CourseIssueError',
+              phase: 'parse',
+            },
+          ]);
+        },
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const failedRender = await fetch(`${baseUrl}/questions/demo/example?variant=1`, {
+        body: new URLSearchParams({ __action: 'grade', ans: '42' }),
+        method: 'POST',
+      });
+      const failedRenderHtml = await failedRender.text();
+
+      assert.equal(failedRender.status, 422);
+      assert.match(failedRenderHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(failedRenderHtml, /Submission parse failed/);
+      assert.equal(renderCalls.length, 1);
+      assert.equal(consoleError.mock.calls.length, 1);
+      assert.equal(consoleError.mock.calls[0]?.[0], 'Question preview render failed:');
+
+      const invalidQid = await fetch(`${baseUrl}/questions/demo%5Cexample?variant=1`, {
+        body: new URLSearchParams({ __action: 'grade', ans: '42' }),
+        method: 'POST',
+      });
+      const invalidQidHtml = await invalidQid.text();
+
+      assert.equal(invalidQid.status, 422);
+      assert.match(invalidQidHtml, /Question preview failed/);
+      assert.equal(renderCalls.length, 1);
+    } finally {
+      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }
@@ -1296,6 +1437,69 @@ describe('question preview server direct preview route', () => {
       assert.match(html, /Runtime direct preview body/);
       assert.match(html, /class="question-container"/);
       nodeAssert.doesNotMatch(html, /New Variant|Question ID|Variant:/i);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('checks posted answers through the PrairieLearn runtime without keeping submission state', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'runtime/gradable';
+    await writeQuestionInfo(courseDir, qid, {
+      title: 'Runtime gradable preview',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111126',
+    });
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<pl-question-panel><p>1 + 1 = ?</p></pl-question-panel><pl-number-input answers-name="ans"></pl-number-input>',
+    );
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'server.py',
+      'def generate(data):\n    data["correct_answers"]["ans"] = 2\n',
+    );
+
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
+    });
+
+    try {
+      const previewUrl = `${serverUrl(started)}/questions/${qid}?variant=1`;
+
+      const correct = await fetch(previewUrl, {
+        body: new URLSearchParams({ __action: 'grade', ans: '2' }),
+        method: 'POST',
+      });
+      const correctHtml = await correct.text();
+
+      assert.equal(correct.status, 200);
+      assert.match(correctHtml, /data-testid="submission-block"/);
+      assert.match(correctHtml, /text-bg-success/);
+      assert.match(correctHtml, /100%/);
+
+      const wrong = await fetch(previewUrl, {
+        body: new URLSearchParams({ __action: 'grade', ans: '3' }),
+        method: 'POST',
+      });
+      const wrongHtml = await wrong.text();
+
+      assert.equal(wrong.status, 200);
+      assert.match(wrongHtml, /data-testid="submission-block"/);
+      assert.match(wrongHtml, /text-bg-danger/);
+      assert.match(wrongHtml, /0%/);
+
+      const refreshed = await fetch(previewUrl);
+      const refreshedHtml = await refreshed.text();
+
+      assert.equal(refreshed.status, 200);
+      nodeAssert.doesNotMatch(refreshedHtml, /submission-block/);
+      assert.match(refreshedHtml, /Check answer/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
