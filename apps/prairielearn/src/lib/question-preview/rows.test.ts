@@ -3,7 +3,11 @@ import { assert, describe, it } from 'vitest';
 import { QuestionJsonSchema } from '../../schemas/index.js';
 
 import { parseQuestionPreviewQid } from './qid.js';
-import { makeLocalPreviewQuestionRows, makeLocalPreviewVariant } from './rows.js';
+import {
+  makeLocalPreviewQuestionRows,
+  makeLocalPreviewSubmission,
+  makeLocalPreviewVariant,
+} from './rows.js';
 
 function parseQid(qid: string) {
   const result = parseQuestionPreviewQid(qid);
@@ -77,5 +81,110 @@ describe('local preview rows', () => {
     assert.deepEqual(variant.params, { value: 1 });
     assert.deepEqual(variant.preferences, { mode: 'fast' });
     assert.deepEqual(variant.true_answer, { value: 2 });
+  });
+
+  it('constructs synthetic graded Submission rows linked to their variant', () => {
+    const variant = makeLocalPreviewVariant(
+      'abc',
+      {
+        broken: false,
+        options: {},
+        params: { value: 1 },
+        preferences: {},
+        true_answer: { value: 2 },
+      },
+      { id: 'preview-variant' },
+    );
+
+    const submission = makeLocalPreviewSubmission(
+      variant,
+      {
+        broken: false,
+        feedback: { note: 'good' },
+        format_errors: {},
+        gradable: true,
+        params: { value: 1 },
+        partial_scores: { ans: { score: 1, weight: 1 } },
+        raw_submitted_answer: { ans: '2' },
+        score: 1,
+        submitted_answer: { ans: 2 },
+        true_answer: { value: 2 },
+      },
+      { id: 'preview-submission' },
+    );
+
+    assert.equal(submission.id, 'preview-submission');
+    assert.equal(submission.variant_id, 'preview-variant');
+    assert.equal(submission.auth_user_id, '1');
+    assert.equal(submission.score, 1);
+    assert.equal(submission.correct, true);
+    assert.instanceOf(submission.graded_at, Date);
+    assert.equal(submission.gradable, true);
+    assert.deepEqual(submission.feedback, { note: 'good' });
+    assert.deepEqual(submission.partial_scores, { ans: { score: 1, weight: 1 } });
+    assert.deepEqual(submission.raw_submitted_answer, { ans: '2' });
+    assert.deepEqual(submission.submitted_answer, { ans: 2 });
+    assert.deepEqual(submission.true_answer, { value: 2 });
+    assert.equal(submission.v2_score, null);
+    assert.equal(submission.credit, null);
+    assert.equal(submission.mode, null);
+  });
+
+  it('constructs ungraded Submission rows without graded_at or correctness', () => {
+    const variant = makeLocalPreviewVariant('abc', {
+      broken: false,
+      options: {},
+      params: {},
+      preferences: {},
+      true_answer: {},
+    });
+
+    const submission = makeLocalPreviewSubmission(variant, {
+      broken: false,
+      feedback: {},
+      format_errors: { ans: 'Invalid format.' },
+      gradable: false,
+      params: {},
+      partial_scores: null,
+      raw_submitted_answer: { ans: 'banana' },
+      score: null,
+      submitted_answer: { ans: 'banana' },
+      true_answer: {},
+    });
+
+    assert.equal(submission.id, '1');
+    assert.equal(submission.variant_id, '1');
+    assert.equal(submission.score, null);
+    assert.equal(submission.correct, null);
+    assert.equal(submission.graded_at, null);
+    assert.equal(submission.gradable, false);
+    assert.deepEqual(submission.format_errors, { ans: 'Invalid format.' });
+    assert.equal(submission.partial_scores, null);
+  });
+
+  it('marks partial-credit Submission rows as not correct', () => {
+    const variant = makeLocalPreviewVariant('abc', {
+      broken: false,
+      options: {},
+      params: {},
+      preferences: {},
+      true_answer: {},
+    });
+
+    const submission = makeLocalPreviewSubmission(variant, {
+      broken: false,
+      feedback: {},
+      format_errors: {},
+      gradable: true,
+      params: {},
+      partial_scores: {},
+      raw_submitted_answer: {},
+      score: 0.5,
+      submitted_answer: {},
+      true_answer: {},
+    });
+
+    assert.equal(submission.correct, false);
+    assert.instanceOf(submission.graded_at, Date);
   });
 });
