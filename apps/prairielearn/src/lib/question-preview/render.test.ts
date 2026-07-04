@@ -139,6 +139,43 @@ describe('question preview renderer', () => {
     }
   });
 
+  it('passes the render mode through to the document renderer', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'startup/question-only', {
+      title: 'Question only',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111117',
+    });
+    await writeQuestionFile(
+      courseDir,
+      'startup/question-only',
+      'question.html',
+      '<p>Question only</p>',
+    );
+
+    const runtime = await createQuestionPreviewRuntime({
+      courseDir,
+      renderMode: 'question-only',
+      urlPrefix: '/preview',
+      workersExecutionMode: 'native',
+    });
+
+    try {
+      const result = await runtime.render({
+        qid: parsePreviewQid('startup/question-only'),
+        variantSeed: '1',
+      });
+
+      assert.equal(result.ok, true);
+      assert.match(result.documentHtml, /Question only/);
+      assert.notMatch(result.documentHtml, /question-form/);
+    } finally {
+      await runtime.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('rejects invalid one-shot qids before runtime startup options are applied', async () => {
     const result = await renderQuestionPreview({
       courseDir: '/tmp/pl-preview-render-test-course',

@@ -16,6 +16,7 @@ import asyncHandler from 'express-async-handler';
 import * as assets from '../assets.js';
 
 import { createQuestionPreviewAssetResolver } from './assets.js';
+import type { QuestionPreviewRenderMode } from './document.js';
 import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import {
   type QuestionPreviewHttpAction,
@@ -23,8 +24,11 @@ import {
   mapQuestionPreviewAssetFileResponse,
   mapQuestionPreviewDocumentResponse,
   mapQuestionPreviewGeneratedFileResponse,
+  mapQuestionPreviewGradingDisabledResponse,
   mapQuestionPreviewInvalidQidResponse,
+  mapQuestionPreviewInvalidRenderModeResponse,
   mapQuestionPreviewInvalidSubmissionActionResponse,
+  mapQuestionPreviewRenderModeUnavailableResponse,
   mapQuestionPreviewRouteErrorResponse,
   mapQuestionPreviewWorkspaceActionResponse,
   mapQuestionPreviewWorkspacePageResponse,
@@ -192,18 +196,24 @@ interface HandleQuestionPreviewRequestParams {
   req: Request;
   res: Response;
   runtime: QuestionPreviewRuntime;
+  serverRenderMode: QuestionPreviewRenderMode;
   submissionBody?: Record<string, unknown>;
 }
 
 /**
  * Handles direct question preview URLs and renders the requested question,
  * checking a posted answer first when a submission body is present.
+ *
+ * A `render-mode` query parameter can narrow an individual page to
+ * `question-only`; the launch-time render mode remains a hard cap, so it
+ * cannot re-enable grading on a question-only server.
  */
 async function handleQuestionPreviewRequest({
   qid,
   req,
   res,
   runtime,
+  serverRenderMode,
   submissionBody,
 }: HandleQuestionPreviewRequestParams) {
   const qidResult = parseQuestionPreviewQid(qid);
@@ -222,8 +232,31 @@ async function handleQuestionPreviewRequest({
 
   const url = new URL(req.url, 'http://question-preview.local');
 
+  const renderModeParam = url.searchParams.get('render-mode');
+  let renderMode = serverRenderMode;
+  if (renderModeParam != null) {
+    if (renderModeParam !== 'full' && renderModeParam !== 'question-only') {
+      await sendQuestionPreviewHttpAction(
+        res,
+        mapQuestionPreviewInvalidRenderModeResponse(renderModeParam),
+      );
+      return;
+    }
+    if (renderModeParam === 'full' && serverRenderMode === 'question-only') {
+      await sendQuestionPreviewHttpAction(res, mapQuestionPreviewRenderModeUnavailableResponse());
+      return;
+    }
+    renderMode = renderModeParam;
+  }
+
+  if (submissionBody != null && renderMode === 'question-only') {
+    await sendQuestionPreviewHttpAction(res, mapQuestionPreviewGradingDisabledResponse());
+    return;
+  }
+
   const result = await runtime.render({
     qid: qidResult.qid,
+    renderMode,
     variantSeed: url.searchParams.get('variant') ?? undefined,
     submission:
       submissionBody == null
@@ -444,31 +477,44 @@ function createQuestionPreviewApp({
         return;
       }
 
-      await handleQuestionPreviewRequest({ qid, req, res, runtime });
-    }),
-  );
-
-  app.post(
-    '/questions/*',
-    // Mirrors the submission body limits of the full PrairieLearn server.
-    express.urlencoded({ extended: false, limit: 5 * 1536 * 1024 }),
-    asyncHandler(async (req, res) => {
-      const qid = req.params[0];
-
-      if (!qid) {
-        res.status(404).end();
-        return;
-      }
-
       await handleQuestionPreviewRequest({
         qid,
         req,
         res,
         runtime,
-        submissionBody: req.body ?? {},
+        serverRenderMode: httpOptions.renderMode,
       });
     }),
   );
+
+  if (httpOptions.renderMode === 'question-only') {
+    app.post('/questions/*', (_req, res) => {
+      void sendQuestionPreviewHttpAction(res, mapQuestionPreviewGradingDisabledResponse());
+    });
+  } else {
+    app.post(
+      '/questions/*',
+      // Mirrors the submission body limits of the full PrairieLearn server.
+      express.urlencoded({ extended: false, limit: 5 * 1536 * 1024 }),
+      asyncHandler(async (req, res) => {
+        const qid = req.params[0];
+
+        if (!qid) {
+          res.status(404).end();
+          return;
+        }
+
+        await handleQuestionPreviewRequest({
+          qid,
+          req,
+          res,
+          runtime,
+          serverRenderMode: httpOptions.renderMode,
+          submissionBody: req.body ?? {},
+        });
+      }),
+    );
+  }
 
   registerQuestionPreviewAssetRoutes(app, assetResolver);
 

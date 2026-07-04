@@ -12,6 +12,7 @@ import {
   type QuestionPreviewDocumentInput,
   type QuestionPreviewDocumentRenderer,
   type QuestionPreviewDocumentResult,
+  type QuestionPreviewRenderMode,
   createQuestionPreviewDocumentRenderer,
   makeQuestionPreviewDocumentFailureResult,
 } from './document.js';
@@ -33,6 +34,7 @@ export interface QuestionPreviewRuntimeStartupOptions {
   localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
+  renderMode?: QuestionPreviewRenderMode;
   startupLogger?: QuestionPreviewStartupLogger;
   urlPrefix?: string;
   workersCount?: number;
@@ -150,6 +152,7 @@ export async function createQuestionPreviewRuntime({
   localPreviewWorkspaces = null,
   prewarmWorkers = false,
   questionTimeoutMilliseconds = 5000,
+  renderMode = 'full',
   startupLogger,
   urlPrefix = DEFAULT_PREVIEW_URL_PREFIX,
   workersCount = 1,
@@ -173,6 +176,7 @@ export async function createQuestionPreviewRuntime({
     courseDir: path.resolve(courseDir),
     localPreviewGeneratedFiles: runtimeLocalPreviewGeneratedFiles,
     localPreviewWorkspaces,
+    renderMode,
     urlPrefix,
   });
   startupLogger?.('Question preview renderer initialized.');
@@ -202,6 +206,7 @@ export async function renderQuestionPreview(
     devMode: input.devMode,
     prewarmWorkers: input.prewarmWorkers,
     questionTimeoutMilliseconds: input.questionTimeoutMilliseconds,
+    renderMode: input.renderMode,
     startupLogger: input.startupLogger,
     urlPrefix: input.urlPrefix,
     workersCount: input.workersCount,
