@@ -33,6 +33,7 @@ const SUPPORTED_FLAGS = new Set([
   'workspace-home-dir',
   'workspace-idle-timeout-ms',
   'workspace-max-containers',
+  'workspace-network',
   'workspace-pull-policy',
   'workspace-start-timeout-ms',
   'workspaces',
@@ -59,6 +60,7 @@ export interface QuestionPreviewServerWorkspaceOptions {
   workspaceHomeDir: string | undefined;
   workspaceIdleTimeoutMs: number;
   workspaceMaxContainers: number;
+  workspaceNetwork: string | undefined;
   workspacePullPolicy: PreviewWorkspacePullPolicy;
   workspaceStartTimeoutMs: number;
   workspacesEnabled: boolean;
@@ -227,6 +229,7 @@ const QuestionPreviewServerOptionsSchema = z.object({
         ctx,
       ),
   ),
+  workspaceNetwork: singleStringFlagSchema('workspace-network'),
   workspacePullPolicy:
     singleStringFlagSchema('workspace-pull-policy').transform(parseWorkspacePullPolicy),
   workspaceStartTimeoutMs: singleStringFlagSchema('workspace-start-timeout-ms').transform(
@@ -271,6 +274,7 @@ export async function parseQuestionPreviewServerOptions(
       'workspace-home-dir',
       'workspace-idle-timeout-ms',
       'workspace-max-containers',
+      'workspace-network',
       'workspace-pull-policy',
       'workspace-start-timeout-ms',
     ],
@@ -298,6 +302,7 @@ export async function parseQuestionPreviewServerOptions(
     workspaceHomeDir: argv['workspace-home-dir'],
     workspaceIdleTimeoutMs: argv['workspace-idle-timeout-ms'],
     workspaceMaxContainers: argv['workspace-max-containers'],
+    workspaceNetwork: argv['workspace-network'],
     workspacePullPolicy: argv['workspace-pull-policy'],
     workspaceStartTimeoutMs: argv['workspace-start-timeout-ms'],
     workspacesEnabled: argv.workspaces,
@@ -343,6 +348,7 @@ export function getQuestionPreviewServerWorkspaceOptions(
     workspaceHomeDir: options.workspaceHomeDir,
     workspaceIdleTimeoutMs: options.workspaceIdleTimeoutMs,
     workspaceMaxContainers: options.workspaceMaxContainers,
+    workspaceNetwork: options.workspaceNetwork,
     workspacePullPolicy: options.workspacePullPolicy,
     workspaceStartTimeoutMs: options.workspaceStartTimeoutMs,
     workspacesEnabled: options.workspacesEnabled,
