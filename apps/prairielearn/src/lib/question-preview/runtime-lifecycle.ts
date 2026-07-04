@@ -7,6 +7,7 @@ import type {
   QuestionPreviewStartupLogger,
   QuestionPreviewWorkersExecutionMode,
 } from './render.js';
+import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
 const QUESTION_PREVIEW_URL_PREFIX = '/preview-render';
 
@@ -27,27 +28,32 @@ export interface QuestionPreviewRuntimeLifecycleStartupOptions {
 
 export interface QuestionPreviewRuntimeLifecycle extends QuestionPreviewRuntime {
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   urlPrefix: string;
 }
 
 interface CreateQuestionPreviewRuntimeLifecycleParams {
   createRuntime: QuestionPreviewRuntimeFactory;
   localPreviewGeneratedFilesMax?: number;
+  localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   runtimeOptions: QuestionPreviewRuntimeLifecycleStartupOptions;
 }
 
 function makeRuntimeStartupOptions({
   localPreviewGeneratedFiles,
+  localPreviewWorkspaces,
   runtimeOptions,
   urlPrefix,
 }: {
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   runtimeOptions: QuestionPreviewRuntimeLifecycleStartupOptions;
   urlPrefix: string;
 }): QuestionPreviewRuntimeStartupOptions {
   return {
     ...runtimeOptions,
     localPreviewGeneratedFiles,
+    localPreviewWorkspaces,
     prewarmWorkers: runtimeOptions.prewarmWorkers ?? true,
     urlPrefix,
   };
@@ -66,6 +72,7 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntimeLifecyc
     private readonly createRuntime: QuestionPreviewRuntimeFactory,
     private readonly runtimeOptions: QuestionPreviewRuntimeStartupOptions,
     readonly localPreviewGeneratedFiles: LocalPreviewGeneratedFiles,
+    readonly localPreviewWorkspaces: PreviewWorkspaceAllocator | null,
     readonly urlPrefix: string,
   ) {
     this.currentRuntime = initialRuntime;
@@ -119,6 +126,7 @@ class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntimeLifecyc
 export async function createQuestionPreviewRuntimeLifecycle({
   createRuntime,
   localPreviewGeneratedFilesMax,
+  localPreviewWorkspaces = null,
   runtimeOptions,
 }: CreateQuestionPreviewRuntimeLifecycleParams): Promise<QuestionPreviewRuntimeLifecycle> {
   const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({
@@ -127,6 +135,7 @@ export async function createQuestionPreviewRuntimeLifecycle({
   });
   const runtimeStartupOptions = makeRuntimeStartupOptions({
     localPreviewGeneratedFiles,
+    localPreviewWorkspaces,
     runtimeOptions,
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
   });
@@ -136,6 +145,7 @@ export async function createQuestionPreviewRuntimeLifecycle({
     createRuntime,
     runtimeStartupOptions,
     localPreviewGeneratedFiles,
+    localPreviewWorkspaces,
     QUESTION_PREVIEW_URL_PREFIX,
   );
 }

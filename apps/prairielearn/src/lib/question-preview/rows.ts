@@ -3,6 +3,7 @@ import { type QuestionJson, defaultWorkspaceOptions } from '../../schemas/index.
 import type { Course, Question, Submission, Variant } from '../db-types.js';
 
 import type { QuestionPreviewQid } from './qid.js';
+import type { PreviewWorkspaceSettings } from './workspace-registry.js';
 
 const PREVIEW_COURSE_ID = '1';
 const PREVIEW_QUESTION_ID = '1';
@@ -148,6 +149,26 @@ function makeLocalPreviewQuestion(qid: QuestionPreviewQid, info: QuestionJson): 
     workspace_image: workspaceOptions.image ?? null,
     workspace_port: workspaceOptions.port ?? null,
     workspace_url_rewrite: workspaceOptions.rewriteUrl ?? null,
+  };
+}
+
+/**
+ * Derives the workspace launch settings for a question, or null when the
+ * question does not use a workspace.
+ */
+export function makePreviewWorkspaceSettings(info: QuestionJson): PreviewWorkspaceSettings | null {
+  const workspaceOptions = info.workspaceOptions;
+  if (workspaceOptions?.image == null) return null;
+
+  return {
+    args: normalizeWorkspaceArgs(workspaceOptions.args),
+    enableNetworking: workspaceOptions.enableNetworking,
+    environment: workspaceOptions.environment,
+    gradedFiles: workspaceOptions.gradedFiles,
+    home: workspaceOptions.home ?? null,
+    image: workspaceOptions.image,
+    port: workspaceOptions.port ?? null,
+    rewriteUrl: workspaceOptions.rewriteUrl ?? true,
   };
 }
 

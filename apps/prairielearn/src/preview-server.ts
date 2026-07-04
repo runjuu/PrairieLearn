@@ -22,6 +22,24 @@ async function main() {
   process.stdout.write(
     `PrairieLearn preview server listening on http://${started.options.host}:${port}\n`,
   );
+
+  // Workspace containers are cleaned up by close(), so shut down gracefully
+  // on Ctrl-C instead of leaking them until the next orphan-pruning startup.
+  let closing = false;
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      if (closing) return;
+      closing = true;
+      logStartupProgress('Stopping PrairieLearn preview server.');
+      started
+        .close()
+        .then(() => process.exit(0))
+        .catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+    });
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

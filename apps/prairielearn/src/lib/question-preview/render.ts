@@ -17,6 +17,7 @@ import {
 } from './document.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { parseQuestionPreviewQid } from './qid.js';
+import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
 const DEFAULT_PREVIEW_URL_PREFIX = '/preview-render';
 
@@ -29,6 +30,7 @@ export interface QuestionPreviewRuntimeStartupOptions {
   courseDir: string;
   devMode?: boolean;
   localPreviewGeneratedFiles?: LocalPreviewGeneratedFiles;
+  localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
   startupLogger?: QuestionPreviewStartupLogger;
@@ -39,7 +41,7 @@ export interface QuestionPreviewRuntimeStartupOptions {
 
 export interface QuestionPreviewInput extends Omit<
   QuestionPreviewRuntimeStartupOptions,
-  'localPreviewGeneratedFiles'
+  'localPreviewGeneratedFiles' | 'localPreviewWorkspaces'
 > {
   qid: string;
   variantSeed?: string;
@@ -145,6 +147,7 @@ export async function createQuestionPreviewRuntime({
   courseDir,
   devMode = false,
   localPreviewGeneratedFiles,
+  localPreviewWorkspaces = null,
   prewarmWorkers = false,
   questionTimeoutMilliseconds = 5000,
   startupLogger,
@@ -169,6 +172,7 @@ export async function createQuestionPreviewRuntime({
   const documentRenderer = createQuestionPreviewDocumentRenderer({
     courseDir: path.resolve(courseDir),
     localPreviewGeneratedFiles: runtimeLocalPreviewGeneratedFiles,
+    localPreviewWorkspaces,
     urlPrefix,
   });
   startupLogger?.('Question preview renderer initialized.');

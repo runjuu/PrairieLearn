@@ -4,11 +4,17 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
+import Docker from 'dockerode';
 import { assert, describe, it, vi } from 'vitest';
 
 import type { QuestionPreviewDiagnostic } from './document.js';
 import { createQuestionPreviewRuntime } from './render.js';
 import { parseQuestionPreviewServerOptions, startQuestionPreviewServer } from './server.js';
+import {
+  type PreviewWorkspaceDockerClient,
+  createPreviewWorkspaceManager,
+} from './workspace-launcher.js';
+import type { PreviewWorkspaceSpec } from './workspace-registry.js';
 
 type StartQuestionPreviewServerParams = Parameters<typeof startQuestionPreviewServer>[0];
 type StartTestQuestionPreviewServerParams = Omit<
@@ -17,11 +23,58 @@ type StartTestQuestionPreviewServerParams = Omit<
 > &
   Partial<Pick<StartQuestionPreviewServerParams, 'createRuntime'>>;
 
+/**
+ * A docker client stub for server tests: no containers exist, no images can
+ * be found, and pulls resolve without producing an image, so workspace
+ * launches fail fast without touching a real Docker daemon.
+ */
+function makeStubDockerClient(): PreviewWorkspaceDockerClient {
+  return {
+    createContainer: () => Promise.reject(new Error('not implemented')),
+    getContainer: () => ({
+      inspect: () => Promise.reject(new Error('not implemented')),
+      remove: () => Promise.resolve(),
+      start: () => Promise.resolve(),
+    }),
+    getImage: () => ({
+      inspect: () => Promise.reject(Object.assign(new Error('no such image'), { statusCode: 404 })),
+    }),
+    listContainers: () => Promise.resolve([]),
+    modem: {
+      followProgress: (_stream, onFinished) => onFinished(null),
+    },
+    ping: () => Promise.resolve(),
+    pull: () => Promise.resolve(null as unknown as NodeJS.ReadableStream),
+  };
+}
+
 function startTestQuestionPreviewServer({
   createRuntime = createQuestionPreviewRuntime,
+  createWorkspaceManager = (options) =>
+    createPreviewWorkspaceManager({ ...options, docker: makeStubDockerClient() }),
   ...params
 }: StartTestQuestionPreviewServerParams) {
-  return startQuestionPreviewServer({ ...params, createRuntime });
+  return startQuestionPreviewServer({ ...params, createRuntime, createWorkspaceManager });
+}
+
+function makeWorkspaceSpec(overrides: Partial<PreviewWorkspaceSpec> = {}): PreviewWorkspaceSpec {
+  return {
+    params: {},
+    qid: 'demo/workspace',
+    settings: {
+      args: null,
+      enableNetworking: false,
+      environment: {},
+      gradedFiles: [],
+      home: '/home/user',
+      image: 'workspace-image',
+      port: 8080,
+      rewriteUrl: true,
+    },
+    trueAnswer: {},
+    variantSeed: '1',
+    ...overrides,
+  };
 }
 
 async function makeTempCourse() {
@@ -166,6 +219,12 @@ describe('question preview server startup', () => {
         questionTimeoutMilliseconds: 5000,
         workersCount: 1,
         workersExecutionMode: 'container',
+        workspaceHomeDir: undefined,
+        workspaceIdleTimeoutMs: 30 * 60 * 1000,
+        workspaceMaxContainers: 3,
+        workspacePullPolicy: 'missing',
+        workspaceStartTimeoutMs: 60 * 1000,
+        workspacesEnabled: true,
       });
 
       const explicitOptions = await parseQuestionPreviewServerOptions([
@@ -184,6 +243,17 @@ describe('question preview server startup', () => {
         '4',
         '--workers-execution-mode',
         'native',
+        '--no-workspaces',
+        '--workspace-home-dir',
+        'preview-homes',
+        '--workspace-idle-timeout-ms',
+        '1000',
+        '--workspace-max-containers',
+        '1',
+        '--workspace-pull-policy',
+        'never',
+        '--workspace-start-timeout-ms',
+        '2000',
       ]);
 
       assert.deepEqual(explicitOptions, {
@@ -195,6 +265,12 @@ describe('question preview server startup', () => {
         questionTimeoutMilliseconds: 1,
         workersCount: 4,
         workersExecutionMode: 'native',
+        workspaceHomeDir: path.resolve('preview-homes'),
+        workspaceIdleTimeoutMs: 1000,
+        workspaceMaxContainers: 1,
+        workspacePullPolicy: 'never',
+        workspaceStartTimeoutMs: 2000,
+        workspacesEnabled: false,
       });
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -239,6 +315,18 @@ describe('question preview server startup', () => {
       {
         argv: ['--course-dir', courseDir, '--workers-execution-mode', 'disabled'],
         message: /Invalid --workers-execution-mode/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--workspace-pull-policy', 'sometimes'],
+        message: /Invalid --workspace-pull-policy/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--workspace-idle-timeout-ms', '0'],
+        message: /Invalid --workspace-idle-timeout-ms/,
+      },
+      {
+        argv: ['--course-dir', courseDir, '--workspace-max-containers', '0'],
+        message: /Invalid --workspace-max-containers/,
       },
       { argv: ['--course-dir', missingCourseDir], message: /Invalid --course-dir/ },
     ];
@@ -351,6 +439,7 @@ describe('question preview server startup', () => {
       assert.deepEqual(logs, [
         'Reading preview server options.',
         `Validated course directory: ${path.resolve(courseDir)}.`,
+        'Initializing workspace manager.',
         'Initializing preview runtime.',
         'Preparing preview asset routes.',
         'Starting HTTP server on 127.0.0.1:0.',
@@ -1609,3 +1698,220 @@ describe('question preview server direct preview route', () => {
     }
   });
 });
+
+describe('question preview server workspace routes', () => {
+  it('serves the workspace page, status endpoint, and reboot/reset actions', async () => {
+    const courseDir = await makeTempCourse();
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => testFailureDocument(),
+      }),
+    });
+    const baseUrl = serverUrl(started);
+
+    try {
+      const workspaceManager = started.workspaceManager;
+      assert.isNotNull(workspaceManager);
+      const { workspaceId, workspaceUrl } = workspaceManager.ensureWorkspace(makeWorkspaceSpec());
+      assert.equal(workspaceUrl, `/workspace/${workspaceId}`);
+
+      const page = await fetch(`${baseUrl}/workspace/${workspaceId}`);
+      const pageBody = await page.text();
+      assert.equal(page.status, 200);
+      assert.match(pageBody, /id="workspace-root"/);
+      assert.match(pageBody, /demo\/workspace/);
+      assert.match(pageBody, /href="\/questions\/demo\/workspace\?variant=1"/);
+
+      const status = await fetch(`${baseUrl}/workspace/${workspaceId}/status`);
+      assert.equal(status.status, 200);
+      const statusJson = await status.json();
+      assert.property(statusJson, 'state');
+      assert.property(statusJson, 'message');
+
+      const beforeHeartbeat = workspaceManager.workspaces.get(workspaceId)!.lastActivityAt;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const heartbeat = await fetch(`${baseUrl}/workspace/${workspaceId}/status?heartbeat=1`);
+      assert.equal(heartbeat.status, 200);
+      assert.isAtLeast(
+        workspaceManager.workspaces.get(workspaceId)!.lastActivityAt,
+        beforeHeartbeat,
+      );
+
+      const reboot = await fetch(`${baseUrl}/workspace/${workspaceId}`, {
+        body: new URLSearchParams({ __action: 'reboot' }),
+        method: 'POST',
+        redirect: 'manual',
+      });
+      assert.equal(reboot.status, 303);
+      assert.equal(reboot.headers.get('location'), `/workspace/${workspaceId}`);
+
+      const reset = await fetch(`${baseUrl}/workspace/${workspaceId}`, {
+        body: new URLSearchParams({ __action: 'reset' }),
+        method: 'POST',
+        redirect: 'manual',
+      });
+      assert.equal(reset.status, 303);
+      assert.equal(workspaceManager.workspaces.get(workspaceId)?.version, 2);
+
+      const invalidAction = await fetch(`${baseUrl}/workspace/${workspaceId}`, {
+        body: new URLSearchParams({ __action: 'destroy' }),
+        method: 'POST',
+        redirect: 'manual',
+      });
+      assert.equal(invalidAction.status, 400);
+
+      const unknownPage = await fetch(`${baseUrl}/workspace/999`);
+      assert.equal(unknownPage.status, 404);
+      assert.match(await unknownPage.text(), /Unknown workspace/);
+
+      const unknownStatus = await fetch(`${baseUrl}/workspace/999/status`);
+      assert.equal(unknownStatus.status, 404);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('responds with 404 for container traffic when the workspace is not running', async () => {
+    const courseDir = await makeTempCourse();
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => testFailureDocument(),
+      }),
+    });
+    const baseUrl = serverUrl(started);
+
+    try {
+      const { workspaceId } = started.workspaceManager!.ensureWorkspace(makeWorkspaceSpec());
+
+      const response = await fetch(`${baseUrl}/workspace/${workspaceId}/container/`);
+      assert.equal(response.status, 404);
+      assert.equal(await response.text(), 'Workspace is not running');
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('disables workspace routes and the renderer allocator with --no-workspaces', async () => {
+    const courseDir = await makeTempCourse();
+    const runtimeOptions: Parameters<StartQuestionPreviewServerParams['createRuntime']>[0][] = [];
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0', '--no-workspaces'],
+      createRuntime: async (options) => {
+        runtimeOptions.push(options);
+        return { close: async () => {}, render: async () => testFailureDocument() };
+      },
+    });
+    const baseUrl = serverUrl(started);
+
+    try {
+      assert.isNull(started.workspaceManager);
+      assert.isNull(runtimeOptions[0]?.localPreviewWorkspaces);
+
+      const response = await fetch(`${baseUrl}/workspace/1`);
+      assert.equal(response.status, 404);
+      assert.match(await response.text(), /Workspaces are disabled/);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+});
+
+// Exercises a real workspace container end-to-end. Opt in with
+// `PL_PREVIEW_WORKSPACE_DOCKER_TEST=1`; requires Docker and pulls the
+// `prairielearn/workspace-xtermjs` image on first run.
+describe.skipIf(process.env.PL_PREVIEW_WORKSPACE_DOCKER_TEST !== '1')(
+  'question preview server with real Docker workspaces',
+  () => {
+    it(
+      'launches, proxies, resets, and cleans up a real workspace container',
+      { timeout: 600_000 },
+      async () => {
+        const courseDir = await makeTempCourse();
+        const workspaceFilesDir = path.join(courseDir, 'questions', 'demo/workspace', 'workspace');
+        await fs.mkdir(workspaceFilesDir, { recursive: true });
+        await fs.writeFile(path.join(workspaceFilesDir, 'starter.c'), 'int main() { return 0; }\n');
+
+        const started = await startQuestionPreviewServer({
+          argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
+          createRuntime: async () => ({
+            close: async () => {},
+            render: async () => testFailureDocument(),
+          }),
+        });
+        const baseUrl = serverUrl(started);
+
+        try {
+          const workspaceManager = started.workspaceManager!;
+          const { workspaceId } = workspaceManager.ensureWorkspace(
+            makeWorkspaceSpec({
+              settings: {
+                args: null,
+                enableNetworking: false,
+                environment: {},
+                gradedFiles: ['**/*.c'],
+                home: null,
+                image: 'prairielearn/workspace-xtermjs',
+                port: null,
+                rewriteUrl: true,
+              },
+            }),
+          );
+
+          const page = await fetch(`${baseUrl}/workspace/${workspaceId}`);
+          assert.equal(page.status, 200);
+
+          await vi.waitFor(
+            async () => {
+              const status = await fetch(`${baseUrl}/workspace/${workspaceId}/status`);
+              const statusJson = await status.json();
+              if (statusJson.state === 'failed') {
+                throw new Error(`Workspace failed to launch: ${statusJson.message}`);
+              }
+              assert.equal(statusJson.state, 'running');
+            },
+            { interval: 1000, timeout: 570_000 },
+          );
+
+          const proxied = await fetch(`${baseUrl}/workspace/${workspaceId}/container/`);
+          assert.equal(proxied.status, 200);
+
+          const graded = await workspaceManager.collectGradedFiles({
+            qid: 'demo/workspace',
+            variantSeed: '1',
+          });
+          assert.isTrue(graded.ok);
+          assert.deepEqual(
+            graded.files.map((file) => file.name),
+            ['starter.c'],
+          );
+
+          await workspaceManager.reset(workspaceId);
+          assert.equal(workspaceManager.workspaces.get(workspaceId)?.state, 'uninitialized');
+        } finally {
+          await started.close();
+          await fs.rm(courseDir, { force: true, recursive: true });
+        }
+
+        const docker = new Docker();
+        const remaining = await docker.listContainers({
+          all: true,
+          filters: { label: ['com.prairielearn.preview-workspace=true'] },
+        });
+        assert.lengthOf(
+          remaining.filter(
+            (container) =>
+              container.Labels['com.prairielearn.preview-workspace.pid'] === String(process.pid),
+          ),
+          0,
+        );
+      },
+    );
+  },
+);
