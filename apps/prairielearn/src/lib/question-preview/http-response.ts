@@ -67,6 +67,24 @@ export function mapQuestionPreviewInvalidQidResponse(): QuestionPreviewHttpActio
   });
 }
 
+export function mapQuestionPreviewInvalidSubmissionActionResponse(
+  submissionAction: unknown,
+): QuestionPreviewHttpAction {
+  return action(
+    {
+      html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+      kind: 'html',
+      status: 400,
+    },
+    [
+      {
+        details: { action: submissionAction },
+        message: 'Question preview submission rejected: expected __action to be "grade".',
+      },
+    ],
+  );
+}
+
 export function mapQuestionPreviewDocumentResponse(
   result: QuestionPreviewDocumentResult,
 ): QuestionPreviewHttpAction {

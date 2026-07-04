@@ -1,5 +1,6 @@
 import type { IncomingMessage, Server } from 'node:http';
 
+import { omit } from 'es-toolkit';
 import express, {
   type ErrorRequestHandler,
   type Express,
@@ -19,6 +20,7 @@ import {
   mapQuestionPreviewDocumentResponse,
   mapQuestionPreviewGeneratedFileResponse,
   mapQuestionPreviewInvalidQidResponse,
+  mapQuestionPreviewInvalidSubmissionActionResponse,
   mapQuestionPreviewRouteErrorResponse,
 } from './http-response.js';
 import { parseQuestionPreviewQid } from './qid.js';
@@ -159,20 +161,31 @@ interface HandleQuestionPreviewRequestParams {
   req: Request;
   res: Response;
   runtime: QuestionPreviewRuntime;
+  submissionBody?: Record<string, unknown>;
 }
 
 /**
- * Handles direct question preview URLs and renders the requested question.
+ * Handles direct question preview URLs and renders the requested question,
+ * checking a posted answer first when a submission body is present.
  */
 async function handleQuestionPreviewRequest({
   qid,
   req,
   res,
   runtime,
+  submissionBody,
 }: HandleQuestionPreviewRequestParams) {
   const qidResult = parseQuestionPreviewQid(qid);
   if (!qidResult.ok) {
     await sendQuestionPreviewHttpAction(res, mapQuestionPreviewInvalidQidResponse());
+    return;
+  }
+
+  if (submissionBody != null && submissionBody.__action !== 'grade') {
+    await sendQuestionPreviewHttpAction(
+      res,
+      mapQuestionPreviewInvalidSubmissionActionResponse(submissionBody.__action),
+    );
     return;
   }
 
@@ -181,6 +194,12 @@ async function handleQuestionPreviewRequest({
   const result = await runtime.render({
     qid: qidResult.qid,
     variantSeed: url.searchParams.get('variant') ?? undefined,
+    submission:
+      submissionBody == null
+        ? undefined
+        : {
+            rawSubmittedAnswer: omit(submissionBody, ['__action', '__csrf_token', '__variant_id']),
+          },
   });
 
   await sendQuestionPreviewHttpAction(res, mapQuestionPreviewDocumentResponse(result));
@@ -245,6 +264,28 @@ function createQuestionPreviewApp({
       }
 
       await handleQuestionPreviewRequest({ qid, req, res, runtime });
+    }),
+  );
+
+  app.post(
+    '/questions/*',
+    // Mirrors the submission body limits of the full PrairieLearn server.
+    express.urlencoded({ extended: false, limit: 5 * 1536 * 1024 }),
+    asyncHandler(async (req, res) => {
+      const qid = req.params[0];
+
+      if (!qid) {
+        res.status(404).end();
+        return;
+      }
+
+      await handleQuestionPreviewRequest({
+        qid,
+        req,
+        res,
+        runtime,
+        submissionBody: req.body ?? {},
+      });
     }),
   );
 

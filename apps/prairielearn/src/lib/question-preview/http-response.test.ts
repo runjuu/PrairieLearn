@@ -6,6 +6,7 @@ import {
   mapQuestionPreviewDocumentResponse,
   mapQuestionPreviewGeneratedFileResponse,
   mapQuestionPreviewInvalidQidResponse,
+  mapQuestionPreviewInvalidSubmissionActionResponse,
   mapQuestionPreviewRouteErrorResponse,
 } from './http-response.js';
 
@@ -128,6 +129,20 @@ describe('question preview HTTP response mapping', () => {
         html: QUESTION_PREVIEW_ERROR_DOCUMENT,
         kind: 'html',
         status: 422,
+      },
+    });
+
+    assert.deepEqual(mapQuestionPreviewInvalidSubmissionActionResponse('save'), {
+      logs: [
+        {
+          details: { action: 'save' },
+          message: 'Question preview submission rejected: expected __action to be "grade".',
+        },
+      ],
+      response: {
+        html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+        kind: 'html',
+        status: 400,
       },
     });
 
