@@ -615,7 +615,7 @@ async function renderQuestionPreviewDocumentResult({
       file:
         file == null
           ? null
-          : (filename) => file(filename, preparedVariant, question, course, caller),
+          : (filename) => file(filename, preparedVariant, null, question, course, caller),
       identity: localPreviewVariantIdentity,
     });
 
