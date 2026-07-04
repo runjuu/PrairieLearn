@@ -23,7 +23,6 @@ const URLS = {
 function makeEntry(overrides: Partial<PreviewWorkspaceEntry> = {}): PreviewWorkspaceEntry {
   return {
     fileGenerationErrors: [],
-    hostPort: null,
     id: '1',
     lastActivityAt: 0,
     launchGeneration: 1,
@@ -45,6 +44,7 @@ function makeEntry(overrides: Partial<PreviewWorkspaceEntry> = {}): PreviewWorks
       variantSeed: '1',
     },
     state: 'launching',
+    target: null,
     version: 1,
     ...overrides,
   };
@@ -53,7 +53,11 @@ function makeEntry(overrides: Partial<PreviewWorkspaceEntry> = {}): PreviewWorks
 describe('makePreviewWorkspaceStatusJson', () => {
   it('exposes the iframe source only when the workspace is running', () => {
     const running = makePreviewWorkspaceStatusJson(
-      makeEntry({ hostPort: 40100, message: 'Workspace is running.', state: 'running' }),
+      makeEntry({
+        message: 'Workspace is running.',
+        state: 'running',
+        target: { host: '127.0.0.1', port: 40100 },
+      }),
       { containerUrl: URLS.containerUrl },
     );
     assert.deepEqual(running, {
@@ -84,7 +88,11 @@ describe('renderPreviewWorkspacePageHtml', () => {
 
   it('renders a running workspace with the iframe pointed at the container', () => {
     const documentHtml = renderPreviewWorkspacePageHtml({
-      entry: makeEntry({ hostPort: 40100, message: 'Workspace is running.', state: 'running' }),
+      entry: makeEntry({
+        message: 'Workspace is running.',
+        state: 'running',
+        target: { host: '127.0.0.1', port: 40100 },
+      }),
       urls: URLS,
     });
 

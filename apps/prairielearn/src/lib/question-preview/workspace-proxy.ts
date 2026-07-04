@@ -10,7 +10,7 @@ const CONTAINER_PATH_REGEX = /^\/workspace\/([0-9]+)\/container\/(.*)/;
 /** The subset of workspace operations the container proxy depends on. */
 export interface PreviewWorkspaceProxyTargets {
   heartbeat(id: string): void;
-  resolveContainerTarget(id: string): { hostPort: number; rewriteUrl: boolean } | null;
+  resolveContainerTarget(id: string): { host: string; port: number; rewriteUrl: boolean } | null;
 }
 
 export interface PreviewWorkspaceProxy {
@@ -131,7 +131,7 @@ export function makePreviewWorkspaceProxy({
       const target = targets.resolveContainerTarget(match.workspaceId);
       if (target == null) throw new Error('Workspace is not running');
 
-      return `http://127.0.0.1:${target.hostPort}/`;
+      return `http://${target.host}:${target.port}/`;
     },
     on: {
       proxyReq: (proxyReq, req) => {
