@@ -16,7 +16,6 @@ beforeAll(async () => {
 const URLS = {
   actionUrl: '/workspace/1',
   containerUrl: '/workspace/1/container/',
-  questionUrl: '/questions/demo/workspace?variant=1',
   statusUrl: '/workspace/1/status',
 };
 
@@ -26,7 +25,7 @@ function makeEntry(overrides: Partial<PreviewWorkspaceEntry> = {}): PreviewWorks
     id: '1',
     lastActivityAt: 0,
     launchGeneration: 1,
-    message: 'Launching workspace.',
+    message: 'Launching',
     spec: {
       params: {},
       qid: 'demo/workspace',
@@ -54,7 +53,7 @@ describe('makePreviewWorkspaceStatusJson', () => {
   it('exposes the iframe source only when the workspace is running', () => {
     const running = makePreviewWorkspaceStatusJson(
       makeEntry({
-        message: 'Workspace is running.',
+        message: 'Running',
         state: 'running',
         target: { host: '127.0.0.1', port: 40100 },
       }),
@@ -62,7 +61,7 @@ describe('makePreviewWorkspaceStatusJson', () => {
     );
     assert.deepEqual(running, {
       iframeSrc: '/workspace/1/container/',
-      message: 'Workspace is running.',
+      message: 'Running',
       state: 'running',
       version: 1,
     });
@@ -81,15 +80,16 @@ describe('renderPreviewWorkspacePageHtml', () => {
 
     assert.include(documentHtml, 'data-state="launching"');
     assert.include(documentHtml, 'data-status-url="/workspace/1/status"');
-    assert.include(documentHtml, 'Launching workspace.');
+    assert.include(documentHtml, 'Launching');
     assert.include(documentHtml, 'id="workspace-waiting-panel"');
+    assert.include(documentHtml, 'pv-status pv-status--launching');
     assert.notInclude(documentHtml, 'src="/workspace/1/container/"');
   });
 
   it('renders a running workspace with the iframe pointed at the container', () => {
     const documentHtml = renderPreviewWorkspacePageHtml({
       entry: makeEntry({
-        message: 'Workspace is running.',
+        message: 'Running',
         state: 'running',
         target: { host: '127.0.0.1', port: 40100 },
       }),
@@ -98,6 +98,17 @@ describe('renderPreviewWorkspacePageHtml', () => {
 
     assert.include(documentHtml, 'data-state="running"');
     assert.include(documentHtml, 'src="/workspace/1/container/"');
+    assert.include(documentHtml, 'pv-status pv-status--running');
+  });
+
+  it('renders the control bar with the short workspace name, preview label, and accessible actions', () => {
+    const documentHtml = renderPreviewWorkspacePageHtml({ entry: makeEntry(), urls: URLS });
+
+    assert.include(documentHtml, 'class="pv-toolbar__name text-truncate"');
+    assert.include(documentHtml, 'workspace <span class="pv-toolbar__preview">(Preview)</span>');
+    assert.include(documentHtml, 'title="demo/workspace"');
+    assert.include(documentHtml, 'aria-label="Reboot workspace"');
+    assert.include(documentHtml, 'aria-label="Reset workspace"');
   });
 
   it('renders reboot and reset forms posting back to the workspace page', () => {
@@ -106,7 +117,6 @@ describe('renderPreviewWorkspacePageHtml', () => {
     assert.include(documentHtml, 'action="/workspace/1"');
     assert.include(documentHtml, 'value="reboot"');
     assert.include(documentHtml, 'value="reset"');
-    assert.include(documentHtml, `href="${URLS.questionUrl}"`);
   });
 
   it('lists file generation errors', () => {
