@@ -31,6 +31,33 @@ async function writeQuestionInfo(courseDir: string, qid: string, info: Record<st
   await writeQuestionFile(courseDir, qid, 'info.json', JSON.stringify(info));
 }
 
+async function writeGradableQuestion(
+  courseDir: string,
+  qid: string,
+  uuid: string,
+  { info = {}, serverPy }: { info?: Record<string, unknown>; serverPy?: string } = {},
+) {
+  await writeQuestionInfo(courseDir, qid, {
+    title: 'Gradable question',
+    topic: 'Testing',
+    type: 'v3',
+    uuid,
+    ...info,
+  });
+  await writeQuestionFile(
+    courseDir,
+    qid,
+    'question.html',
+    '<pl-question-panel><p>1 + 1 = ?</p></pl-question-panel><pl-number-input answers-name="ans"></pl-number-input>',
+  );
+  await writeQuestionFile(
+    courseDir,
+    qid,
+    'server.py',
+    serverPy ?? 'def generate(data):\n    data["correct_answers"]["ans"] = 2\n',
+  );
+}
+
 function parsePreviewQid(qid: string): QuestionPreviewQid {
   const result = parseQuestionPreviewQid(qid);
   if (!result.ok) throw new Error(result.error.message);
@@ -105,6 +132,10 @@ describe('question preview document', () => {
         assert.match(result.documentHtml, /data-variant-id="1"/);
         assert.match(result.documentHtml, /data-variant-token="[^"]+"/);
         assert.match(result.documentHtml, /Rendered preview/);
+        assert.match(result.documentHtml, /name="__action"/);
+        assert.match(result.documentHtml, /value="grade"/);
+        assert.match(result.documentHtml, /Check answer/);
+        assert.notMatch(result.documentHtml, /submission-block/);
         assert.notMatch(result.documentHtml, /question-block/);
         assert.notMatch(result.documentHtml, /card-header/);
         assert.equal('payload' in result, false);
@@ -332,6 +363,152 @@ describe('question preview document', () => {
         assert.equal(result.diagnostics[0].phase, 'generate');
         assert.match(result.diagnostics[0].message, /output logged on console/);
         assert.equal('stack' in result.diagnostics[0], false);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('grades submissions through the document seam', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(courseDir, 'demo/gradable', '11111111-1111-4111-8111-111111111116');
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const qid = parsePreviewQid('demo/gradable');
+
+        const correct = await renderer.render({
+          qid,
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: '2' } },
+        });
+        assert.equal(correct.ok, true);
+        assert.deepEqual(correct.diagnostics, []);
+        assert.match(correct.documentHtml, /data-testid="submission-block"/);
+        assert.match(correct.documentHtml, /text-bg-success/);
+        assert.match(correct.documentHtml, /100%/);
+        assert.match(correct.documentHtml, /Check answer/);
+
+        const wrong = await renderer.render({
+          qid,
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: '3' } },
+        });
+        assert.equal(wrong.ok, true);
+        assert.match(wrong.documentHtml, /data-testid="submission-block"/);
+        assert.match(wrong.documentHtml, /text-bg-danger/);
+        assert.match(wrong.documentHtml, /0%/);
+
+        const invalid = await renderer.render({
+          qid,
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: 'banana' } },
+        });
+        assert.equal(invalid.ok, true);
+        assert.match(invalid.documentHtml, /data-testid="submission-block"/);
+        assert.match(invalid.documentHtml, /invalid, not gradable/);
+        assert.notMatch(invalid.documentHtml, /text-bg-success/);
+
+        const refreshed = await renderer.render({ qid, variantSeed: '1' });
+        assert.equal(refreshed.ok, true);
+        assert.notMatch(refreshed.documentHtml, /submission-block/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns diagnostics only for fatal PrairieLearn parse issues', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(courseDir, 'broken/parse', '11111111-1111-4111-8111-111111111117', {
+      serverPy:
+        'def generate(data):\n' +
+        '    data["correct_answers"]["ans"] = 2\n' +
+        'def parse(data):\n' +
+        '    raise Exception("preview parse failed")\n',
+    });
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('broken/parse'),
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: '2' } },
+        });
+
+        assert.equal(result.ok, false);
+        assertGenericFailureDocument(result.documentHtml);
+        assert.equal(result.diagnostics[0].name, 'CourseIssueError');
+        assert.equal(result.diagnostics[0].fatal, true);
+        assert.equal(result.diagnostics[0].phase, 'parse');
+        assert.match(result.diagnostics[0].message, /server\.py/);
+        assert.equal(JSON.stringify(result.diagnostics[0]).includes(courseDir), false);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns diagnostics only for fatal PrairieLearn grade issues', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(courseDir, 'broken/grade', '11111111-1111-4111-8111-111111111118', {
+      serverPy:
+        'def generate(data):\n' +
+        '    data["correct_answers"]["ans"] = 2\n' +
+        'def grade(data):\n' +
+        '    raise Exception("preview grade failed")\n',
+    });
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('broken/grade'),
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: '2' } },
+        });
+
+        assert.equal(result.ok, false);
+        assertGenericFailureDocument(result.documentHtml);
+        assert.equal(result.diagnostics[0].name, 'CourseIssueError');
+        assert.equal(result.diagnostics[0].fatal, true);
+        assert.equal(result.diagnostics[0].phase, 'grade');
+        assert.match(result.diagnostics[0].message, /server\.py/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('skips grading for questions without Internal grading', async () => {
+    const courseDir = await makeTempCourse();
+    await writeGradableQuestion(
+      courseDir,
+      'external/gradable',
+      '11111111-1111-4111-8111-111111111119',
+      { info: { gradingMethod: 'External' } },
+    );
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const qid = parsePreviewQid('external/gradable');
+
+        const rendered = await renderer.render({ qid, variantSeed: '1' });
+        assert.equal(rendered.ok, true);
+        assert.notMatch(rendered.documentHtml, /Check answer<\/button>/);
+        assert.match(rendered.documentHtml, /Check answer is unavailable/);
+        assert.match(rendered.documentHtml, /External grading/);
+
+        const submitted = await renderer.render({
+          qid,
+          variantSeed: '1',
+          submission: { rawSubmittedAnswer: { ans: '2' } },
+        });
+        assert.equal(submitted.ok, true);
+        assert.deepEqual(submitted.diagnostics, []);
+        assert.match(submitted.documentHtml, /alert-secondary/);
+        assert.match(submitted.documentHtml, /External grading, which is not supported/);
+        assert.match(submitted.documentHtml, /Only internally graded questions/);
+        assert.notMatch(submitted.documentHtml, /submission-block/);
       });
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
