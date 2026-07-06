@@ -612,6 +612,7 @@ export async function startQuestionPreviewServer({
         containerNetwork: workspaceOptions.workspaceNetwork,
         courseDir: options.courseDir,
         homeRoot,
+        homeVolume: workspaceOptions.workspaceHomeVolume,
         idleTimeoutMs: workspaceOptions.workspaceIdleTimeoutMs,
         logger: (message) => console.error(message),
         maxRunningContainers: workspaceOptions.workspaceMaxContainers,

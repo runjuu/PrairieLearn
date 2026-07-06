@@ -36,7 +36,13 @@ export interface PreviewWorkspaceContainerCreateOptions {
   Env: string[];
   ExposedPorts: Record<string, Record<string, never>>;
   HostConfig: {
-    Binds: string[];
+    Binds?: string[];
+    Mounts?: {
+      Type: 'volume';
+      Source: string;
+      Target: string;
+      VolumeOptions?: { Subpath?: string };
+    }[];
     NetworkMode: string;
     PortBindings?: Record<string, { HostIp: string; HostPort: string }[]>;
   };
@@ -109,6 +115,7 @@ export interface PreviewWorkspaceManagerOptions {
   healthCheckIntervalMs?: number;
   healthCheckTimeoutMs?: number;
   homeRoot: string;
+  homeVolume?: string;
   idleSweepIntervalMs?: number;
   idleTimeoutMs: number;
   logger?: (message: string) => void;
@@ -283,6 +290,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   private readonly healthCheckIntervalMs: number;
   private readonly healthCheckTimeoutMs: number;
   private readonly homeRoot: string;
+  private readonly homeVolume: string | undefined;
   private readonly idleSweepTimer: NodeJS.Timeout;
   private readonly idleTimeoutMs: number;
   private readonly logger: (message: string) => void;
@@ -296,7 +304,12 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   constructor(options: PreviewWorkspaceManagerOptions) {
     this.containerNetwork = options.containerNetwork;
     this.courseDir = options.courseDir;
-    this.docker = options.docker ?? new Docker();
+    // dockerode's Docker satisfies our deliberately-minimal client seam, but the
+    // hand-rolled create-options carry a partial Mounts.VolumeOptions (only Subpath)
+    // that @types/dockerode's VolumeOptions (NoCopy/Labels/DriverConfig required)
+    // won't structurally accept, so assert the shape at this one boundary rather than
+    // widen the local type or pad every mount with fields Docker treats as optional.
+    this.docker = options.docker ?? (new Docker() as unknown as PreviewWorkspaceDockerClient);
     this.fetchFn = options.fetchFn ?? fetch;
     this.gradedFilesLimits = options.gradedFilesLimits ?? {
       maxFiles: config.workspaceMaxGradedFilesCount,
@@ -305,6 +318,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     this.healthCheckIntervalMs = options.healthCheckIntervalMs ?? 1000;
     this.healthCheckTimeoutMs = options.healthCheckTimeoutMs ?? 10_000;
     this.homeRoot = options.homeRoot;
+    this.homeVolume = options.homeVolume;
     this.idleTimeoutMs = options.idleTimeoutMs;
     this.logger = options.logger ?? (() => {});
     this.maxRunningContainers = options.maxRunningContainers;
@@ -411,7 +425,11 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     for (const containerInfo of containers) {
       const prune = shouldPruneContainer(containerInfo.Labels, {
         isPidAlive: isProcessAlive,
-        ownHomeRoot: this.homeRoot,
+        // Match the home-root label we actually write (volume name in volume mode).
+        // The pid label is the preview server's in-container pid (1), which is alive
+        // in every fresh preview container, so the pid fallback can't reap volume-mode
+        // orphans — the identity match must key on the same value set at launch.
+        ownHomeRoot: this.homeVolume ?? this.homeRoot,
       });
       if (!prune) continue;
 
@@ -508,9 +526,23 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     const alias = `pl-workspace-${id}-${version}`;
 
     const hostConfig: PreviewWorkspaceContainerCreateOptions['HostConfig'] = {
-      Binds: [`${homeDir}:${containerHome}`],
       NetworkMode: network ?? 'bridge',
     };
+    // Volume path: mount the workspace subpath of the daemon-managed named
+    // volume so no host path crosses the Docker Desktop VM boundary. Host-path
+    // path: bind the workspace home directory directly (default behavior).
+    if (this.homeVolume != null) {
+      hostConfig.Mounts = [
+        {
+          Type: 'volume',
+          Source: this.homeVolume,
+          Target: containerHome,
+          VolumeOptions: { Subpath: path.relative(this.homeRoot, homeDir) },
+        },
+      ];
+    } else {
+      hostConfig.Binds = [`${homeDir}:${containerHome}`];
+    }
     // Native path: publish the container port on the host loopback so the
     // proxy can reach it at 127.0.0.1. Shared-network path: publish nothing;
     // the proxy reaches the container by its network alias instead.
@@ -531,7 +563,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       Image: spec.settings.image,
       Labels: {
         [PREVIEW_WORKSPACE_CONTAINER_LABEL]: 'true',
-        [PREVIEW_WORKSPACE_HOME_ROOT_LABEL]: this.homeRoot,
+        [PREVIEW_WORKSPACE_HOME_ROOT_LABEL]: this.homeVolume ?? this.homeRoot,
         [PREVIEW_WORKSPACE_ID_LABEL]: id,
         [PREVIEW_WORKSPACE_PID_LABEL]: String(this.pid),
         [PREVIEW_WORKSPACE_VERSION_LABEL]: String(version),
