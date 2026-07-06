@@ -14,6 +14,7 @@ import express, {
 import asyncHandler from 'express-async-handler';
 
 import * as assets from '../assets.js';
+import { guessMimeType } from '../mime-type.js';
 
 import { createQuestionPreviewAssetResolver } from './assets.js';
 import type { QuestionPreviewRenderMode } from './document.js';
@@ -30,6 +31,7 @@ import {
   mapQuestionPreviewInvalidSubmissionActionResponse,
   mapQuestionPreviewRenderModeUnavailableResponse,
   mapQuestionPreviewRouteErrorResponse,
+  mapQuestionPreviewSubmissionFileResponse,
   mapQuestionPreviewWorkspacePageResponse,
   mapQuestionPreviewWorkspaceStatusResponse,
 } from './http-response.js';
@@ -48,6 +50,7 @@ import {
   getQuestionPreviewServerWorkspaceOptions,
   parseQuestionPreviewServerOptions,
 } from './server-options.js';
+import type { LocalPreviewSubmissionFiles } from './submission-files.js';
 import {
   type PreviewWorkspaceManager,
   type PreviewWorkspaceManagerOptions,
@@ -115,6 +118,10 @@ async function sendQuestionPreviewHttpResponse(
   switch (response.kind) {
     case 'attachment':
       res.status(response.status).attachment(response.filename).send(response.data);
+      return;
+    case 'bytes':
+      res.setHeader('Content-Type', response.contentType);
+      res.status(response.status).send(response.data);
       return;
     case 'empty':
       res.status(response.status).end();
@@ -185,6 +192,47 @@ function registerQuestionPreviewAssetRoutes(
         res.status(405).end();
       });
   }
+}
+
+async function handleQuestionPreviewSubmissionFileRequest(
+  res: Response,
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles,
+  pathname: string,
+) {
+  const resolved = localPreviewSubmissionFiles.resolveRequest(pathname);
+  if (!resolved?.found) {
+    await sendQuestionPreviewHttpAction(
+      res,
+      mapQuestionPreviewSubmissionFileResponse({ found: false }),
+    );
+    return;
+  }
+
+  const contentType = await guessMimeType(resolved.filename, resolved.contents);
+  await sendQuestionPreviewHttpAction(
+    res,
+    mapQuestionPreviewSubmissionFileResponse({
+      contentType,
+      data: resolved.contents,
+      found: true,
+    }),
+  );
+}
+
+function registerQuestionPreviewSubmissionFileRoutes(
+  app: Express,
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles,
+) {
+  app.get(
+    localPreviewSubmissionFiles.routePattern,
+    asyncHandler(async (req, res) => {
+      await handleQuestionPreviewSubmissionFileRequest(
+        res,
+        localPreviewSubmissionFiles,
+        rawRequestPathname(req),
+      );
+    }),
+  );
 }
 
 interface HandleQuestionPreviewRequestParams {
@@ -403,6 +451,7 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
 interface CreateQuestionPreviewAppParams {
   httpOptions: QuestionPreviewServerHttpOptions;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   runtime: QuestionPreviewRuntime;
   urlPrefix: string;
   workspaceManager: PreviewWorkspaceManager | null;
@@ -416,6 +465,7 @@ interface CreateQuestionPreviewAppParams {
 function createQuestionPreviewApp({
   httpOptions,
   localPreviewGeneratedFiles,
+  localPreviewSubmissionFiles,
   runtime,
   urlPrefix,
   workspaceManager,
@@ -500,6 +550,7 @@ function createQuestionPreviewApp({
   }
 
   registerQuestionPreviewAssetRoutes(app, assetResolver);
+  registerQuestionPreviewSubmissionFileRoutes(app, localPreviewSubmissionFiles);
 
   app.use((_req, res) => {
     res.status(404).end();
@@ -597,6 +648,7 @@ export async function startQuestionPreviewServer({
     const { app, workspaceUpgradeHandler } = createQuestionPreviewApp({
       httpOptions,
       localPreviewGeneratedFiles: runtime.localPreviewGeneratedFiles,
+      localPreviewSubmissionFiles: runtime.localPreviewSubmissionFiles,
       runtime,
       urlPrefix: runtime.urlPrefix,
       workspaceManager,
