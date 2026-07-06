@@ -338,6 +338,35 @@ describe('preview workspace manager', () => {
     assert.equal(await fs.readFile(path.join(homeDir, 'starter.txt'), 'utf8'), 'starter contents');
   });
 
+  it('mounts the named volume subpath instead of a host bind when homeVolume is provided', async () => {
+    const homeVolume = 'pl-preview-workspaces-course-123';
+    const manager = makeManager({ homeVolume });
+    const { workspaceId } = manager.ensureWorkspace(makeSpec());
+
+    await manager.requestLaunch(workspaceId);
+
+    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+
+    const container = docker.containers[0];
+    // In volume mode the container mounts the workspace subpath of the named
+    // volume via HostConfig.Mounts and must not use host-path Binds.
+    assert.isUndefined(container.options.HostConfig.Binds);
+    assert.deepEqual(container.options.HostConfig.Mounts, [
+      {
+        Type: 'volume',
+        Source: homeVolume,
+        Target: '/home/user',
+        VolumeOptions: { Subpath: path.join(`workspace-${workspaceId}-1`, 'current') },
+      },
+    ]);
+    // The orphan-reaping label must equal the volume name in volume mode so the
+    // extension can reap this course's containers by matching the volume name.
+    assert.equal(
+      container.options.Labels['com.prairielearn.preview-workspace.home-root'],
+      homeVolume,
+    );
+  });
+
   it('attaches the workspace to a shared network and targets it by alias', async () => {
     const manager = makeManager({ containerNetwork: 'pl-preview-net' });
     const { workspaceId } = manager.ensureWorkspace(makeSpec());
@@ -373,7 +402,7 @@ describe('preview workspace manager', () => {
     await manager.requestLaunch(workspaceId);
 
     assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
-    assert.match(docker.containers[0].options.HostConfig.Binds[0], /:\/home\/labeled$/);
+    assert.match(docker.containers[0].options.HostConfig.Binds?.[0] ?? '', /:\/home\/labeled$/);
     assert.property(docker.containers[0].options.HostConfig.PortBindings, '9000/tcp');
   });
 
