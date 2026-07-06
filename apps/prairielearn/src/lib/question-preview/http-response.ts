@@ -27,11 +27,6 @@ export type QuestionPreviewHttpResponse =
       body: unknown;
       kind: 'json';
       status: number;
-    }
-  | {
-      kind: 'redirect';
-      location: string;
-      status: 303;
     };
 
 interface QuestionPreviewHttpLogEntry {
@@ -219,21 +214,6 @@ export function mapQuestionPreviewWorkspaceStatusResponse(
   }
 
   return action({ body: statusJson, kind: 'json', status: 200 });
-}
-
-export function mapQuestionPreviewWorkspaceActionResponse(
-  input: { kind: 'invalid-action'; action: unknown } | { kind: 'redirect'; location: string },
-): QuestionPreviewHttpAction {
-  if (input.kind === 'invalid-action') {
-    return action({ kind: 'empty', status: 400 }, [
-      {
-        details: { action: input.action },
-        message: 'Workspace action rejected: expected __action to be "reboot" or "reset".',
-      },
-    ]);
-  }
-
-  return action({ kind: 'redirect', location: input.location, status: 303 });
 }
 
 export function mapQuestionPreviewRouteErrorResponse(err: unknown): QuestionPreviewHttpAction {
