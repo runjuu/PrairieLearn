@@ -30,7 +30,6 @@ import {
   mapQuestionPreviewInvalidSubmissionActionResponse,
   mapQuestionPreviewRenderModeUnavailableResponse,
   mapQuestionPreviewRouteErrorResponse,
-  mapQuestionPreviewWorkspaceActionResponse,
   mapQuestionPreviewWorkspacePageResponse,
   mapQuestionPreviewWorkspaceStatusResponse,
 } from './http-response.js';
@@ -138,9 +137,6 @@ async function sendQuestionPreviewHttpResponse(
       return;
     case 'json':
       res.status(response.status).json(response.body);
-      return;
-    case 'redirect':
-      res.redirect(response.status, response.location);
       return;
   }
 }
@@ -276,7 +272,6 @@ function makePreviewWorkspacePageUrls(
   const workspaceUrl = workspaceManager.workspaces.workspaceUrl(entry.id);
 
   return {
-    actionUrl: workspaceUrl,
     containerUrl: workspaceManager.workspaces.containerUrl(entry.id),
     statusUrl: `${workspaceUrl}/status`,
   };
@@ -333,51 +328,41 @@ function registerQuestionPreviewWorkspaceRoutes(
     }),
   );
 
-  app.post(
-    '/workspace/:workspaceId',
-    express.urlencoded({ extended: false }),
-    asyncHandler(async (req, res) => {
-      const entry = workspaceManager.workspaces.get(req.params.workspaceId);
-      if (entry == null) {
+  // Reboot/reset are exposed as programmatic endpoints (rather than an in-page
+  // form) so the embedding host can drive them from its own controls and confirm
+  // through a native dialog. Each returns the resulting status JSON; the caller
+  // reloads the workspace iframe to pick up the fresh container.
+  for (const action of ['reboot', 'reset'] as const) {
+    app.post(
+      `/workspace/:workspaceId/${action}`,
+      asyncHandler(async (req, res) => {
+        const entry = workspaceManager.workspaces.get(req.params.workspaceId);
+        if (entry == null) {
+          await sendQuestionPreviewHttpAction(res, mapQuestionPreviewWorkspaceStatusResponse(null));
+          return;
+        }
+
+        if (action === 'reboot') {
+          await workspaceManager.reboot(entry.id);
+        } else {
+          await workspaceManager.reset(entry.id);
+        }
+        // reboot() already kicks off a relaunch; reset() leaves the workspace
+        // uninitialized, so start one here too or it would stay down until the
+        // next page load triggers a launch.
+        void workspaceManager.requestLaunch(entry.id);
+
         await sendQuestionPreviewHttpAction(
           res,
-          mapQuestionPreviewWorkspacePageResponse({
-            html: renderPreviewWorkspaceUnavailableHtml({
-              reason: 'Unknown workspace. Open a workspace question and use its workspace button.',
+          mapQuestionPreviewWorkspaceStatusResponse(
+            makePreviewWorkspaceStatusJson(entry, {
+              containerUrl: workspaceManager.workspaces.containerUrl(entry.id),
             }),
-            status: 404,
-          }),
+          ),
         );
-        return;
-      }
-
-      const submissionAction = req.body?.__action;
-      if (submissionAction !== 'reboot' && submissionAction !== 'reset') {
-        await sendQuestionPreviewHttpAction(
-          res,
-          mapQuestionPreviewWorkspaceActionResponse({
-            action: submissionAction,
-            kind: 'invalid-action',
-          }),
-        );
-        return;
-      }
-
-      if (submissionAction === 'reboot') {
-        await workspaceManager.reboot(entry.id);
-      } else {
-        await workspaceManager.reset(entry.id);
-      }
-
-      await sendQuestionPreviewHttpAction(
-        res,
-        mapQuestionPreviewWorkspaceActionResponse({
-          kind: 'redirect',
-          location: workspaceManager.workspaces.workspaceUrl(entry.id),
-        }),
-      );
-    }),
-  );
+      }),
+    );
+  }
 
   app.get(
     '/workspace/:workspaceId/status',

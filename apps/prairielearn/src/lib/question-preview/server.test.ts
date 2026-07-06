@@ -1869,7 +1869,7 @@ describe('question preview server workspace routes', () => {
       assert.equal(page.status, 200);
       assert.match(pageBody, /id="workspace-root"/);
       assert.match(pageBody, /demo\/workspace/);
-      assert.match(pageBody, /href="\/questions\/demo\/workspace\?variant=1"/);
+      assert.notMatch(pageBody, /pv-toolbar/);
 
       const status = await fetch(`${baseUrl}/workspace/${workspaceId}/status`);
       assert.equal(status.status, 200);
@@ -1886,28 +1886,19 @@ describe('question preview server workspace routes', () => {
         beforeHeartbeat,
       );
 
-      const reboot = await fetch(`${baseUrl}/workspace/${workspaceId}`, {
-        body: new URLSearchParams({ __action: 'reboot' }),
-        method: 'POST',
-        redirect: 'manual',
-      });
-      assert.equal(reboot.status, 303);
-      assert.equal(reboot.headers.get('location'), `/workspace/${workspaceId}`);
+      const reboot = await fetch(`${baseUrl}/workspace/${workspaceId}/reboot`, { method: 'POST' });
+      assert.equal(reboot.status, 200);
+      const rebootJson = await reboot.json();
+      assert.equal(rebootJson.state, 'launching');
 
-      const reset = await fetch(`${baseUrl}/workspace/${workspaceId}`, {
-        body: new URLSearchParams({ __action: 'reset' }),
-        method: 'POST',
-        redirect: 'manual',
-      });
-      assert.equal(reset.status, 303);
+      const reset = await fetch(`${baseUrl}/workspace/${workspaceId}/reset`, { method: 'POST' });
+      assert.equal(reset.status, 200);
+      const resetJson = await reset.json();
+      assert.property(resetJson, 'state');
       assert.equal(workspaceManager.workspaces.get(workspaceId)?.version, 2);
 
-      const invalidAction = await fetch(`${baseUrl}/workspace/${workspaceId}`, {
-        body: new URLSearchParams({ __action: 'destroy' }),
-        method: 'POST',
-        redirect: 'manual',
-      });
-      assert.equal(invalidAction.status, 400);
+      const unknownReboot = await fetch(`${baseUrl}/workspace/999/reboot`, { method: 'POST' });
+      assert.equal(unknownReboot.status, 404);
 
       const unknownPage = await fetch(`${baseUrl}/workspace/999`);
       assert.equal(unknownPage.status, 404);
