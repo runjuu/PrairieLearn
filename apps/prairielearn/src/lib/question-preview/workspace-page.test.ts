@@ -14,7 +14,6 @@ beforeAll(async () => {
 });
 
 const URLS = {
-  actionUrl: '/workspace/1',
   containerUrl: '/workspace/1/container/',
   statusUrl: '/workspace/1/status',
 };
@@ -82,7 +81,6 @@ describe('renderPreviewWorkspacePageHtml', () => {
     assert.include(documentHtml, 'data-status-url="/workspace/1/status"');
     assert.include(documentHtml, 'Launching');
     assert.include(documentHtml, 'id="workspace-waiting-panel"');
-    assert.include(documentHtml, 'pv-status pv-status--launching');
     assert.notInclude(documentHtml, 'src="/workspace/1/container/"');
   });
 
@@ -98,25 +96,15 @@ describe('renderPreviewWorkspacePageHtml', () => {
 
     assert.include(documentHtml, 'data-state="running"');
     assert.include(documentHtml, 'src="/workspace/1/container/"');
-    assert.include(documentHtml, 'pv-status pv-status--running');
   });
 
-  it('renders the control bar with the short workspace name, preview label, and accessible actions', () => {
+  it('renders no in-page controls, since the embedding host owns them', () => {
     const documentHtml = renderPreviewWorkspacePageHtml({ entry: makeEntry(), urls: URLS });
 
-    assert.include(documentHtml, 'class="pv-toolbar__name text-truncate"');
-    assert.include(documentHtml, 'workspace <span class="pv-toolbar__preview">(Preview)</span>');
-    assert.include(documentHtml, 'title="demo/workspace"');
-    assert.include(documentHtml, 'aria-label="Reboot workspace"');
-    assert.include(documentHtml, 'aria-label="Reset workspace"');
-  });
-
-  it('renders reboot and reset forms posting back to the workspace page', () => {
-    const documentHtml = renderPreviewWorkspacePageHtml({ entry: makeEntry(), urls: URLS });
-
-    assert.include(documentHtml, 'action="/workspace/1"');
-    assert.include(documentHtml, 'value="reboot"');
-    assert.include(documentHtml, 'value="reset"');
+    assert.notInclude(documentHtml, 'pv-toolbar');
+    assert.notInclude(documentHtml, '__action');
+    assert.notInclude(documentHtml, 'aria-label="Reboot workspace"');
+    assert.notInclude(documentHtml, 'aria-label="Reset workspace"');
   });
 
   it('lists file generation errors', () => {
