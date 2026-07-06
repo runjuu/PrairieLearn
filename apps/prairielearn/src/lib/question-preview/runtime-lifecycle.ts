@@ -7,6 +7,7 @@ import type {
   QuestionPreviewStartupLogger,
   QuestionPreviewWorkersExecutionMode,
 } from './render.js';
+import { LocalPreviewSubmissionFiles } from './submission-files.js';
 import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
 const QUESTION_PREVIEW_URL_PREFIX = '/preview-render';
@@ -29,6 +30,7 @@ export interface QuestionPreviewRuntimeLifecycleStartupOptions {
 
 export interface QuestionPreviewRuntimeLifecycle extends QuestionPreviewRuntime {
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   urlPrefix: string;
 }
@@ -42,11 +44,13 @@ interface CreateQuestionPreviewRuntimeLifecycleParams {
 
 function makeRuntimeStartupOptions({
   localPreviewGeneratedFiles,
+  localPreviewSubmissionFiles,
   localPreviewWorkspaces,
   runtimeOptions,
   urlPrefix,
 }: {
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   runtimeOptions: QuestionPreviewRuntimeLifecycleStartupOptions;
   urlPrefix: string;
@@ -54,6 +58,7 @@ function makeRuntimeStartupOptions({
   return {
     ...runtimeOptions,
     localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles,
     localPreviewWorkspaces,
     prewarmWorkers: runtimeOptions.prewarmWorkers ?? true,
     urlPrefix,
@@ -67,15 +72,36 @@ function makeRuntimeStartupOptions({
 class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntimeLifecycle {
   private currentRuntime: QuestionPreviewRuntime | null;
   private nextRuntimePromise: Promise<QuestionPreviewRuntime> | null = null;
+  private readonly createRuntime: QuestionPreviewRuntimeFactory;
+  private readonly runtimeOptions: QuestionPreviewRuntimeStartupOptions;
+  readonly localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  readonly localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
+  readonly localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
+  readonly urlPrefix: string;
 
-  constructor(
-    initialRuntime: QuestionPreviewRuntime,
-    private readonly createRuntime: QuestionPreviewRuntimeFactory,
-    private readonly runtimeOptions: QuestionPreviewRuntimeStartupOptions,
-    readonly localPreviewGeneratedFiles: LocalPreviewGeneratedFiles,
-    readonly localPreviewWorkspaces: PreviewWorkspaceAllocator | null,
-    readonly urlPrefix: string,
-  ) {
+  constructor({
+    createRuntime,
+    initialRuntime,
+    localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles,
+    localPreviewWorkspaces,
+    runtimeOptions,
+    urlPrefix,
+  }: {
+    createRuntime: QuestionPreviewRuntimeFactory;
+    initialRuntime: QuestionPreviewRuntime;
+    localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+    localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
+    localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
+    runtimeOptions: QuestionPreviewRuntimeStartupOptions;
+    urlPrefix: string;
+  }) {
+    this.createRuntime = createRuntime;
+    this.runtimeOptions = runtimeOptions;
+    this.localPreviewGeneratedFiles = localPreviewGeneratedFiles;
+    this.localPreviewSubmissionFiles = localPreviewSubmissionFiles;
+    this.localPreviewWorkspaces = localPreviewWorkspaces;
+    this.urlPrefix = urlPrefix;
     this.currentRuntime = initialRuntime;
   }
 
@@ -134,19 +160,24 @@ export async function createQuestionPreviewRuntimeLifecycle({
     max: localPreviewGeneratedFilesMax,
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
   });
+  const localPreviewSubmissionFiles = new LocalPreviewSubmissionFiles({
+    urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
+  });
   const runtimeStartupOptions = makeRuntimeStartupOptions({
     localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles,
     localPreviewWorkspaces,
     runtimeOptions,
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
   });
 
-  return new ReplaceableQuestionPreviewRuntime(
-    await createRuntime(runtimeStartupOptions),
+  return new ReplaceableQuestionPreviewRuntime({
     createRuntime,
-    runtimeStartupOptions,
+    initialRuntime: await createRuntime(runtimeStartupOptions),
     localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles,
     localPreviewWorkspaces,
-    QUESTION_PREVIEW_URL_PREFIX,
-  );
+    runtimeOptions: runtimeStartupOptions,
+    urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
+  });
 }

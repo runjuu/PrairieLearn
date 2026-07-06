@@ -1,6 +1,6 @@
 import { assert, describe, it } from 'vitest';
 
-import { guessMimeType } from './submissionFile.js';
+import { guessMimeType } from './mime-type.js';
 
 describe('guessMimeType', () => {
   it('returns media mime types for typical image, video, and PDF extensions', async () => {

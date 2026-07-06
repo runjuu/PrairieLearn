@@ -12,6 +12,7 @@ import {
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 import { createQuestionPreviewRuntime } from './render.js';
+import { LocalPreviewSubmissionFiles } from './submission-files.js';
 import type { PreviewWorkspaceGradedFilesResult } from './workspace-files.js';
 import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 import { LocalPreviewWorkspaces, type PreviewWorkspaceSpec } from './workspace-registry.js';
@@ -95,6 +96,7 @@ async function withInitializedDocumentRenderer<T>(
   const renderer = createQuestionPreviewDocumentRenderer({
     courseDir,
     localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
     localPreviewWorkspaces,
     renderMode,
     urlPrefix: '/preview',
@@ -339,6 +341,7 @@ describe('question preview document', () => {
     const renderer = createQuestionPreviewDocumentRenderer({
       courseDir: '/tmp/pl-preview-render-test-course',
       localPreviewGeneratedFiles: new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' }),
+      localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
       urlPrefix: '/preview',
     });
 

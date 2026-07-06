@@ -9,6 +9,12 @@ export type QuestionPreviewHttpResponse =
       status: 200;
     }
   | {
+      contentType: string;
+      data: Buffer;
+      kind: 'bytes';
+      status: 200;
+    }
+  | {
       kind: 'empty';
       status: number;
     }
@@ -177,6 +183,25 @@ export function mapQuestionPreviewGeneratedFileResponse(
     data: result.generatedFile.data,
     filename: result.filename,
     kind: 'attachment',
+    status: 200,
+  });
+}
+
+export type QuestionPreviewSubmissionFileHttpResult =
+  | { found: false }
+  | { contentType: string; data: Buffer; found: true };
+
+export function mapQuestionPreviewSubmissionFileResponse(
+  result: QuestionPreviewSubmissionFileHttpResult,
+): QuestionPreviewHttpAction {
+  if (!result.found) {
+    return action({ kind: 'empty', status: 404 });
+  }
+
+  return action({
+    contentType: result.contentType,
+    data: result.data,
+    kind: 'bytes',
     status: 200,
   });
 }
