@@ -31,6 +31,7 @@ const SUPPORTED_FLAGS = new Set([
   'workers-count',
   'workers-execution-mode',
   'workspace-home-dir',
+  'workspace-home-volume',
   'workspace-idle-timeout-ms',
   'workspace-max-containers',
   'workspace-network',
@@ -58,6 +59,7 @@ export interface QuestionPreviewServerRuntimeOptions extends QuestionPreviewRunt
 
 export interface QuestionPreviewServerWorkspaceOptions {
   workspaceHomeDir: string | undefined;
+  workspaceHomeVolume: string | undefined;
   workspaceIdleTimeoutMs: number;
   workspaceMaxContainers: number;
   workspaceNetwork: string | undefined;
@@ -211,6 +213,7 @@ const QuestionPreviewServerOptionsSchema = z.object({
   workspaceHomeDir: singleStringFlagSchema('workspace-home-dir').transform((workspaceHomeDir) =>
     workspaceHomeDir == null ? undefined : path.resolve(workspaceHomeDir),
   ),
+  workspaceHomeVolume: singleStringFlagSchema('workspace-home-volume'),
   workspaceIdleTimeoutMs: singleStringFlagSchema('workspace-idle-timeout-ms').transform(
     (value, ctx) =>
       parsePositiveInteger(
@@ -272,6 +275,7 @@ export async function parseQuestionPreviewServerOptions(
       'workers-count',
       'workers-execution-mode',
       'workspace-home-dir',
+      'workspace-home-volume',
       'workspace-idle-timeout-ms',
       'workspace-max-containers',
       'workspace-network',
@@ -300,6 +304,7 @@ export async function parseQuestionPreviewServerOptions(
     workersCount: argv['workers-count'],
     workersExecutionMode: argv['workers-execution-mode'],
     workspaceHomeDir: argv['workspace-home-dir'],
+    workspaceHomeVolume: argv['workspace-home-volume'],
     workspaceIdleTimeoutMs: argv['workspace-idle-timeout-ms'],
     workspaceMaxContainers: argv['workspace-max-containers'],
     workspaceNetwork: argv['workspace-network'],
@@ -346,6 +351,7 @@ export function getQuestionPreviewServerWorkspaceOptions(
 ): QuestionPreviewServerWorkspaceOptions {
   return {
     workspaceHomeDir: options.workspaceHomeDir,
+    workspaceHomeVolume: options.workspaceHomeVolume,
     workspaceIdleTimeoutMs: options.workspaceIdleTimeoutMs,
     workspaceMaxContainers: options.workspaceMaxContainers,
     workspaceNetwork: options.workspaceNetwork,
