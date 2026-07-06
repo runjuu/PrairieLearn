@@ -26,6 +26,7 @@ import {
   makeLocalPreviewVariant,
   makePreviewWorkspaceSettings,
 } from './rows.js';
+import { type LocalPreviewSubmissionFiles, type PreviewSubmittedFile } from './submission-files.js';
 import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
 interface QuestionPreviewSubmissionInput {
@@ -50,6 +51,7 @@ export type QuestionPreviewRenderMode = 'full' | 'question-only';
 export interface QuestionPreviewDocumentRendererOptions {
   courseDir: string;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   renderMode?: QuestionPreviewRenderMode;
   urlPrefix: string;
@@ -92,6 +94,7 @@ export type QuestionPreviewDocumentResult =
 interface QuestionPreviewInternalRenderInput extends QuestionPreviewDocumentInput {
   courseDir: string;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   renderMode: QuestionPreviewRenderMode;
   urlPrefix: string;
@@ -502,9 +505,28 @@ async function readQuestionInfo(courseDir: string, qid: QuestionPreviewQid): Pro
   return parsed.data;
 }
 
+function previewSubmittedFiles(
+  submittedAnswer: Record<string, unknown> | null,
+): PreviewSubmittedFile[] {
+  const files = submittedAnswer?._files;
+  if (!Array.isArray(files)) return [];
+
+  const submittedFiles: PreviewSubmittedFile[] = [];
+  for (const file of files) {
+    if (file == null || typeof file !== 'object') continue;
+    const { contents, name } = file as Record<string, unknown>;
+    if (typeof contents === 'string' && typeof name === 'string') {
+      submittedFiles.push({ contents, name });
+    }
+  }
+
+  return submittedFiles;
+}
+
 async function renderQuestionPreviewDocumentResult({
   courseDir,
   localPreviewGeneratedFiles,
+  localPreviewSubmissionFiles,
   localPreviewWorkspaces,
   qid,
   renderMode,
@@ -760,6 +782,20 @@ async function renderQuestionPreviewDocumentResult({
     const showCorrectAnswer =
       renderMode === 'full' && question.show_correct_answer === true && submission != null;
 
+    // The graded submission's files (workspace graded files and file uploads)
+    // are held in an in-memory store keyed by a per-render submission id, so
+    // `pl-file-preview` can download and inline-preview them for this render.
+    // The freeform layer builds the file URLs from `submission.id`, so it must
+    // be assigned before rendering.
+    if (submission != null) {
+      const submissionFiles = previewSubmittedFiles(submission.submitted_answer);
+      if (submissionFiles.length > 0) {
+        const submissionId = localPreviewSubmissionFiles.createSubmissionId();
+        submission.id = submissionId;
+        localPreviewSubmissionFiles.registerFiles({ files: submissionFiles, id: submissionId });
+      }
+    }
+
     phase = 'render';
     const renderResult = await questionServer.render({
       course,
@@ -851,6 +887,7 @@ async function renderQuestionPreviewDocumentResult({
 export function createQuestionPreviewDocumentRenderer({
   courseDir,
   localPreviewGeneratedFiles,
+  localPreviewSubmissionFiles,
   localPreviewWorkspaces = null,
   renderMode = 'full',
   urlPrefix,
@@ -862,6 +899,7 @@ export function createQuestionPreviewDocumentRenderer({
       return renderQuestionPreviewDocumentResult({
         courseDir: resolvedCourseDir,
         localPreviewGeneratedFiles,
+        localPreviewSubmissionFiles,
         localPreviewWorkspaces,
         qid: input.qid,
         renderMode: input.renderMode ?? renderMode,

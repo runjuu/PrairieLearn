@@ -1,4 +1,5 @@
 import nodeAssert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -1840,6 +1841,63 @@ describe('question preview server direct preview route', () => {
       nodeAssert.doesNotMatch(serverRefreshBody, /server edit one/);
     } finally {
       consoleError.mockRestore();
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+});
+
+describe('question preview server submission files', () => {
+  it('serves a graded submission file so pl-file-preview can download and inline-preview it', async () => {
+    const courseDir = await makeTempCourse();
+    const qid = 'runtime/submission-file';
+    await writeQuestionInfo(courseDir, qid, {
+      title: 'Submission file preview',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111140',
+    });
+    await writeQuestionFile(
+      courseDir,
+      qid,
+      'question.html',
+      '<pl-file-editor file-name="solution.py"></pl-file-editor><pl-file-preview></pl-file-preview>',
+    );
+
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0', '--workers-execution-mode', 'native'],
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const fileContents = 'print("hello from solution")\n';
+      const answerName = `_file_editor_${createHash('sha1').update('solution.py').digest('hex')}`;
+
+      const graded = await fetch(`${baseUrl}/questions/${qid}?variant=1`, {
+        body: new URLSearchParams({
+          __action: 'grade',
+          [answerName]: Buffer.from(fileContents).toString('base64'),
+        }),
+        method: 'POST',
+      });
+      const gradedHtml = await graded.text();
+
+      assert.equal(graded.status, 200);
+      assert.match(gradedHtml, /data-file="solution\.py"/);
+      const match = gradedHtml.match(
+        /data-submission-files-url="(?<url>\/preview-render\/question\/[^"]+\/submission\/[^"]+\/file)"/,
+      );
+      assert.isNotNull(match);
+      const submissionFilesUrl = match.groups?.url ?? '';
+
+      const fileResponse = await fetch(`${baseUrl}${submissionFilesUrl}/solution.py`);
+      assert.equal(fileResponse.status, 200);
+      assert.equal(fileResponse.headers.get('content-type'), 'text/plain');
+      assert.equal(await fileResponse.text(), fileContents);
+
+      const missing = await fetch(`${baseUrl}${submissionFilesUrl}/missing.py`);
+      assert.equal(missing.status, 404);
+    } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }

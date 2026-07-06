@@ -18,6 +18,7 @@ import {
 } from './document.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { parseQuestionPreviewQid } from './qid.js';
+import { LocalPreviewSubmissionFiles } from './submission-files.js';
 import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
 const DEFAULT_PREVIEW_URL_PREFIX = '/preview-render';
@@ -31,6 +32,7 @@ export interface QuestionPreviewRuntimeStartupOptions {
   courseDir: string;
   devMode?: boolean;
   localPreviewGeneratedFiles?: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles?: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
@@ -43,7 +45,7 @@ export interface QuestionPreviewRuntimeStartupOptions {
 
 export interface QuestionPreviewInput extends Omit<
   QuestionPreviewRuntimeStartupOptions,
-  'localPreviewGeneratedFiles' | 'localPreviewWorkspaces'
+  'localPreviewGeneratedFiles' | 'localPreviewSubmissionFiles' | 'localPreviewWorkspaces'
 > {
   qid: string;
   variantSeed?: string;
@@ -149,6 +151,7 @@ export async function createQuestionPreviewRuntime({
   courseDir,
   devMode = false,
   localPreviewGeneratedFiles,
+  localPreviewSubmissionFiles,
   localPreviewWorkspaces = null,
   prewarmWorkers = false,
   questionTimeoutMilliseconds = 5000,
@@ -172,9 +175,12 @@ export async function createQuestionPreviewRuntime({
   startupLogger?.('Preparing question preview renderer.');
   const runtimeLocalPreviewGeneratedFiles =
     localPreviewGeneratedFiles ?? new LocalPreviewGeneratedFiles({ urlPrefix });
+  const runtimeLocalPreviewSubmissionFiles =
+    localPreviewSubmissionFiles ?? new LocalPreviewSubmissionFiles({ urlPrefix });
   const documentRenderer = createQuestionPreviewDocumentRenderer({
     courseDir: path.resolve(courseDir),
     localPreviewGeneratedFiles: runtimeLocalPreviewGeneratedFiles,
+    localPreviewSubmissionFiles: runtimeLocalPreviewSubmissionFiles,
     localPreviewWorkspaces,
     renderMode,
     urlPrefix,
