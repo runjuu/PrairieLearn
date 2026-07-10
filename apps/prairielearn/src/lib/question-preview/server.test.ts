@@ -512,6 +512,8 @@ describe('Local Preview Session contract', () => {
         '0',
         '--render-mode',
         'full',
+        '--question-timeout-ms',
+        '2345',
         '--workers-count',
         '4',
         '--workspaces',
@@ -550,7 +552,7 @@ describe('Local Preview Session contract', () => {
           workspaces: true,
         },
         limits: {
-          questionTimeoutMs: 5000,
+          questionTimeoutMs: 2345,
           workersCount: 4,
           workspaceIdleTimeoutMs: 1000,
           workspaceMaxContainers: 2,
@@ -1828,6 +1830,74 @@ describe('question preview server asset routes', () => {
 });
 
 describe('question preview server direct preview route', () => {
+  it('bounds a complete GET render and remains usable after the timed-out render finishes', async () => {
+    const courseDir = await makeTempCourse();
+    let finishFirstRender = () => {};
+    let markFirstRenderFinished = () => {};
+    const firstRenderCanFinish = new Promise<void>((resolve) => {
+      finishFirstRender = resolve;
+    });
+    const firstRenderFinished = new Promise<void>((resolve) => {
+      markFirstRenderFinished = resolve;
+    });
+    let renderCalls = 0;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--course-dir',
+        courseDir,
+        '--port',
+        '0',
+        '--question-timeout-ms',
+        '20',
+        '--render-mode',
+        'full',
+      ],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => {
+          renderCalls++;
+          if (renderCalls === 1) {
+            await firstRenderCanFinish;
+            markFirstRenderFinished();
+            return testSuccessDocument(`<p>Late render from ${courseDir}</p>`);
+          }
+          return testSuccessDocument('<p>Recovered render</p>');
+        },
+      }),
+    });
+
+    try {
+      const firstResponse = await fetch(
+        `${startupSessionUrl(started)}/questions/demo/example?variant=1`,
+        { signal: AbortSignal.timeout(1000) },
+      );
+      const firstHtml = await firstResponse.text();
+
+      assert.equal(firstResponse.status, 504);
+      assert.match(firstResponse.headers.get('content-type') ?? '', /text\/html/);
+      assert.match(firstHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(firstHtml, /Late render/);
+      nodeAssert.doesNotMatch(firstHtml, new RegExp(courseDir.replaceAll('/', '\\/')));
+
+      const recoveredResponse = await fetch(
+        `${startupSessionUrl(started)}/questions/demo/example?variant=2`,
+      );
+      assert.equal(recoveredResponse.status, 200);
+      assert.match(await recoveredResponse.text(), /Recovered render/);
+      assert.equal(renderCalls, 2);
+
+      finishFirstRender();
+      await firstRenderFinished;
+      nodeAssert.doesNotMatch(firstHtml, /Late render/);
+    } finally {
+      finishFirstRender();
+      consoleError.mockRestore();
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('defaults missing variants and renders a full HTML document for direct question URLs', async () => {
     const courseDir = await makeTempCourse();
     const renderCalls: { qid: string; variantSeed?: string }[] = [];
@@ -1993,6 +2063,154 @@ describe('question preview server direct preview route', () => {
         },
       ]);
     } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('bounds a complete POST answer check and remains usable after late grading finishes', async () => {
+    const courseDir = await makeTempCourse();
+    let finishFirstRender = () => {};
+    let markFirstRenderFinished = () => {};
+    const firstRenderCanFinish = new Promise<void>((resolve) => {
+      finishFirstRender = resolve;
+    });
+    const firstRenderFinished = new Promise<void>((resolve) => {
+      markFirstRenderFinished = resolve;
+    });
+    const submittedAnswers: unknown[] = [];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--course-dir',
+        courseDir,
+        '--port',
+        '0',
+        '--question-timeout-ms',
+        '20',
+        '--render-mode',
+        'full',
+      ],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async (input) => {
+          submittedAnswers.push(input.submission?.rawSubmittedAnswer);
+          if (submittedAnswers.length === 1) {
+            await firstRenderCanFinish;
+            markFirstRenderFinished();
+            return testSuccessDocument(`<p>Late grading from ${courseDir}</p>`);
+          }
+          return testSuccessDocument('<p>Recovered grading</p>');
+        },
+      }),
+    });
+
+    try {
+      const questionUrl = `${startupSessionUrl(started)}/questions/demo/example?variant=1`;
+      const firstResponse = await fetch(questionUrl, {
+        body: new URLSearchParams({ __action: 'grade', ans: 'slow' }),
+        method: 'POST',
+        signal: AbortSignal.timeout(1000),
+      });
+      const firstHtml = await firstResponse.text();
+
+      assert.equal(firstResponse.status, 504);
+      assert.match(firstResponse.headers.get('content-type') ?? '', /text\/html/);
+      assert.match(firstHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(firstHtml, /Late grading/);
+      nodeAssert.doesNotMatch(firstHtml, new RegExp(courseDir.replaceAll('/', '\\/')));
+
+      const recoveredResponse = await fetch(questionUrl, {
+        body: new URLSearchParams({ __action: 'grade', ans: 'recovered' }),
+        method: 'POST',
+      });
+      assert.equal(recoveredResponse.status, 200);
+      assert.match(await recoveredResponse.text(), /Recovered grading/);
+      assert.deepEqual(submittedAnswers, [{ ans: 'slow' }, { ans: 'recovered' }]);
+
+      finishFirstRender();
+      await firstRenderFinished;
+      nodeAssert.doesNotMatch(firstHtml, /Late grading/);
+    } finally {
+      finishFirstRender();
+      consoleError.mockRestore();
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('starts the POST deadline before reading the submitted form body', async () => {
+    const courseDir = await makeTempCourse();
+    let renderCalls = 0;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--course-dir',
+        courseDir,
+        '--port',
+        '0',
+        '--question-timeout-ms',
+        '20',
+        '--render-mode',
+        'full',
+      ],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => {
+          renderCalls++;
+          return testSuccessDocument('<p>Rendered after the expired deadline</p>');
+        },
+      }),
+    });
+
+    try {
+      const address = started.server.address();
+      if (address == null || typeof address === 'string') {
+        throw new Error('Expected preview server to listen on a TCP address.');
+      }
+      const body = '__action=grade&ans=slow';
+      let bodySent = false;
+      const response = await new Promise<{ body: string; status: number }>((resolve, reject) => {
+        const req = http.request(
+          {
+            headers: {
+              'content-length': Buffer.byteLength(body),
+              'content-type': 'application/x-www-form-urlencoded',
+            },
+            host: address.address,
+            method: 'POST',
+            path: `${startupSessionPath(started)}/questions/demo/example?variant=1`,
+            port: address.port,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+            res.on('error', reject);
+            res.on('end', () => {
+              clearTimeout(sendBody);
+              req.destroy();
+              resolve({
+                body: Buffer.concat(chunks).toString('utf8'),
+                status: res.statusCode ?? 0,
+              });
+            });
+          },
+        );
+        req.on('error', reject);
+        req.flushHeaders();
+        const sendBody = setTimeout(() => {
+          bodySent = true;
+          req.end(body);
+        }, 100);
+      });
+
+      assert.equal(response.status, 504);
+      assert.match(response.body, /Question preview failed/);
+      nodeAssert.doesNotMatch(response.body, /Rendered after the expired deadline/);
+      assert.isFalse(bodySent);
+      assert.equal(renderCalls, 0);
+    } finally {
+      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }

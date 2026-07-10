@@ -43,6 +43,7 @@ import {
   mapQuestionPreviewRenderModeUnavailableResponse,
   mapQuestionPreviewRouteErrorResponse,
   mapQuestionPreviewSubmissionFileResponse,
+  mapQuestionPreviewTimeoutResponse,
   mapQuestionPreviewWorkspacePageResponse,
   mapQuestionPreviewWorkspaceStatusResponse,
 } from './http-response.js';
@@ -299,12 +300,34 @@ function registerQuestionPreviewSubmissionFileRoutes(
 }
 
 interface HandleQuestionPreviewRequestParams {
+  deadline: QuestionPreviewRequestDeadline;
   qid: string;
   req: Request;
   res: Response;
   runtime: QuestionPreviewRuntime;
   serverRenderMode: QuestionPreviewRenderMode;
   submissionBody?: Record<string, unknown>;
+}
+
+class QuestionPreviewRequestTimeoutError extends Error {
+  override name = 'QuestionPreviewRequestTimeoutError';
+}
+
+interface QuestionPreviewRequestDeadline {
+  exceeded: Promise<never>;
+  expired: boolean;
+  questionTimeoutMilliseconds: number;
+}
+
+function renderQuestionPreviewBeforeDeadline<T>(
+  render: () => Promise<T>,
+  deadline: QuestionPreviewRequestDeadline,
+): Promise<T> {
+  if (deadline.expired) {
+    return Promise.reject(new QuestionPreviewRequestTimeoutError());
+  }
+
+  return Promise.race([Promise.resolve().then(render), deadline.exceeded]);
 }
 
 /**
@@ -316,6 +339,7 @@ interface HandleQuestionPreviewRequestParams {
  * cannot re-enable grading on a question-only server.
  */
 async function handleQuestionPreviewRequest({
+  deadline,
   qid,
   req,
   res,
@@ -361,17 +385,37 @@ async function handleQuestionPreviewRequest({
     return;
   }
 
-  const result = await runtime.render({
-    qid: qidResult.qid,
-    renderMode,
-    variantSeed: url.searchParams.get('variant') ?? undefined,
-    submission:
-      submissionBody == null
-        ? undefined
-        : {
-            rawSubmittedAnswer: omit(submissionBody, ['__action', '__csrf_token', '__variant_id']),
-          },
-  });
+  let result;
+  try {
+    result = await renderQuestionPreviewBeforeDeadline(
+      () =>
+        runtime.render({
+          qid: qidResult.qid,
+          renderMode,
+          variantSeed: url.searchParams.get('variant') ?? undefined,
+          submission:
+            submissionBody == null
+              ? undefined
+              : {
+                  rawSubmittedAnswer: omit(submissionBody, [
+                    '__action',
+                    '__csrf_token',
+                    '__variant_id',
+                  ]),
+                },
+        }),
+      deadline,
+    );
+  } catch (err) {
+    if (!(err instanceof QuestionPreviewRequestTimeoutError)) throw err;
+    if (!res.headersSent) {
+      await sendQuestionPreviewHttpAction(
+        res,
+        mapQuestionPreviewTimeoutResponse(deadline.questionTimeoutMilliseconds),
+      );
+    }
+    return;
+  }
 
   await sendQuestionPreviewHttpAction(res, mapQuestionPreviewDocumentResponse(result));
 }
@@ -565,8 +609,38 @@ function createQuestionPreviewApp({
   }
   registerQuestionPreviewWorkspaceRoutes(app, workspaceManager);
 
+  const startQuestionDeadline = (_req: Request, res: Response, next: NextFunction) => {
+    let rejectExceeded: (err: Error) => void = () => {};
+    const deadline: QuestionPreviewRequestDeadline = {
+      exceeded: new Promise<never>((_resolve, reject) => {
+        rejectExceeded = reject;
+      }),
+      expired: false,
+      questionTimeoutMilliseconds: httpOptions.questionTimeoutMilliseconds,
+    };
+    void deadline.exceeded.catch(() => {});
+    res.locals.questionPreviewDeadline = deadline;
+
+    const timeout = setTimeout(() => {
+      deadline.expired = true;
+      if (!res.headersSent) {
+        void sendQuestionPreviewHttpAction(
+          res,
+          mapQuestionPreviewTimeoutResponse(httpOptions.questionTimeoutMilliseconds),
+        ).catch(next);
+      }
+      rejectExceeded(new QuestionPreviewRequestTimeoutError());
+    }, httpOptions.questionTimeoutMilliseconds);
+    timeout.unref();
+    const clearDeadline = () => clearTimeout(timeout);
+    res.once('finish', clearDeadline);
+    res.once('close', clearDeadline);
+    next();
+  };
+
   app.get(
     '/questions/*',
+    startQuestionDeadline,
     asyncHandler(async (req, res) => {
       const qid = questionQidFromRawPath(req, sessionPrefix);
 
@@ -576,6 +650,7 @@ function createQuestionPreviewApp({
       }
 
       await handleQuestionPreviewRequest({
+        deadline: res.locals.questionPreviewDeadline,
         qid,
         req,
         res,
@@ -595,6 +670,7 @@ function createQuestionPreviewApp({
   } else {
     app.post(
       '/questions/*',
+      startQuestionDeadline,
       // Mirrors the submission body limits of the full PrairieLearn server.
       express.urlencoded({ extended: false, limit: 5 * 1536 * 1024 }),
       asyncHandler(async (req, res) => {
@@ -606,6 +682,7 @@ function createQuestionPreviewApp({
         }
 
         await handleQuestionPreviewRequest({
+          deadline: res.locals.questionPreviewDeadline,
           qid,
           req,
           res,
