@@ -26,6 +26,7 @@ function testFailureDocument(diagnostics: QuestionPreviewDiagnostic[] = []) {
     diagnostics,
     documentHtml: '<!doctype html><html><body>Question preview failed</body></html>',
     ok: false as const,
+    reason: 'render-failure' as const,
   };
 }
 
@@ -57,6 +58,21 @@ describe('question preview HTTP response mapping', () => {
         status: 422,
       },
     });
+
+    assert.deepEqual(
+      mapQuestionPreviewDocumentResponse({
+        ...testFailureDocument(diagnostics),
+        reason: 'question-not-found',
+      }),
+      {
+        logs: [],
+        response: {
+          html: '<!doctype html><html><body>Question preview failed</body></html>',
+          kind: 'html',
+          status: 404,
+        },
+      },
+    );
   });
 
   it('maps generated-file results into empty, logged, or attachment responses', () => {
