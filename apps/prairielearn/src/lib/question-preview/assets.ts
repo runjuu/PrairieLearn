@@ -1,33 +1,33 @@
 import path from 'node:path';
 
-import type { LocalPreviewCourseSource } from './course-source.js';
+import type { LocalPreviewCourseResource, LocalPreviewCourseSource } from './course-source.js';
 import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, questionPreviewQidFromPathSegments } from './qid.js';
 
 const STARTUP_COURSE_ASSET_ROUTES = [
   {
     pathPrefix: '/clientFilesCourse/',
-    rootPathSegments: ['clientFilesCourse'],
+    resourceKind: 'course-client-file',
     stripCachebuster: false,
   },
   {
     pathPrefix: '/elements/',
-    rootPathSegments: ['elements'],
+    resourceKind: 'element-file',
     stripCachebuster: false,
   },
   {
     pathPrefix: '/cacheableElements/',
-    rootPathSegments: ['elements'],
+    resourceKind: 'element-file',
     stripCachebuster: true,
   },
   {
     pathPrefix: '/elementExtensions/',
-    rootPathSegments: ['elementExtensions'],
+    resourceKind: 'element-extension-file',
     stripCachebuster: false,
   },
   {
     pathPrefix: '/cacheableElementExtensions/',
-    rootPathSegments: ['elementExtensions'],
+    resourceKind: 'element-extension-file',
     stripCachebuster: true,
   },
 ] as const;
@@ -88,8 +88,7 @@ function decodeSafeUrlPathSegments(encodedPath: string) {
 }
 
 interface BoundedAssetRequest {
-  rootPathSegments: string[];
-  segments: string[];
+  resource: LocalPreviewCourseResource;
 }
 
 function withUrlPrefix(urlPrefix: string, pathPrefix: string) {
@@ -114,8 +113,7 @@ function startupCourseAssetRequestFromPathname({
     if (fileSegments.length === 0) return null;
 
     return {
-      rootPathSegments: [...route.rootPathSegments],
-      segments: fileSegments,
+      resource: { filePathSegments: fileSegments, kind: route.resourceKind },
     };
   }
 
@@ -133,8 +131,11 @@ function startupCourseAssetRequestFromPathname({
     if (!qidResult.ok) return null;
 
     return {
-      rootPathSegments: ['questions', ...qidResult.qid.pathSegments, 'clientFilesQuestion'],
-      segments: fileSegments,
+      resource: {
+        filePathSegments: fileSegments,
+        kind: 'question-client-file',
+        qid: qidResult.qid,
+      },
     };
   }
 
@@ -167,7 +168,7 @@ export function createQuestionPreviewAssetResolver({
       });
 
       if (assetRequest == null) return null;
-      return courseSource.resolveFile(assetRequest.rootPathSegments, assetRequest.segments);
+      return courseSource.resolveResource(assetRequest.resource);
     },
     async resolveGeneratedFile(pathname: string) {
       return localPreviewGeneratedFiles.resolveRequest(pathname);

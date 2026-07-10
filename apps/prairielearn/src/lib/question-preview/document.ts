@@ -10,11 +10,14 @@ import { QuestionTitle } from '../../components/QuestionContainer.js';
 import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { type SubmissionForRender, SubmissionPanel } from '../../components/SubmissionPanel.js';
 import * as questionServers from '../../question-servers/index.js';
+import { CodeCallerPoolUnavailableError } from '../code-caller/code-caller-shared.js';
 import { config } from '../config.js';
 import type { Course, Question, Submission, Variant } from '../db-types.js';
 
 import { makeQuestionPreviewAssetUrls } from './assets.js';
 import type { LocalPreviewCourseSource } from './course-source.js';
+import { QuestionPreviewEngineGenerationError } from './engine-error.js';
+import { ExpectedQuestionPreviewError, type QuestionPreviewPhase } from './expected-error.js';
 import { type LocalPreviewGeneratedFiles } from './generated-files.js';
 import type { QuestionPreviewQid } from './qid.js';
 import {
@@ -54,15 +57,6 @@ export interface QuestionPreviewDocumentRendererOptions {
   urlPrefix: string;
 }
 
-type QuestionPreviewPhase =
-  | 'input'
-  | 'metadata'
-  | 'generate'
-  | 'prepare'
-  | 'parse'
-  | 'grade'
-  | 'render';
-
 export interface QuestionPreviewDiagnostic {
   data?: unknown;
   fatal: boolean;
@@ -95,19 +89,6 @@ interface QuestionPreviewInternalRenderInput extends QuestionPreviewDocumentInpu
   localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   renderMode: QuestionPreviewRenderMode;
   urlPrefix: string;
-}
-
-class ExpectedQuestionPreviewError extends Error {
-  data?: unknown;
-  expectedQuestionPreviewFailure = true;
-  fatal = true;
-  phase: QuestionPreviewPhase;
-
-  constructor(message: string, { data, phase }: { data?: unknown; phase: QuestionPreviewPhase }) {
-    super(message);
-    this.data = data;
-    this.phase = phase;
-  }
 }
 
 function makePreviewLocals({
@@ -147,53 +128,41 @@ function makePreviewLocals({
 
 function diagnosticsFromIssues(
   issues: (Error & { fatal?: boolean; data?: unknown })[],
+  courseSource: LocalPreviewCourseSource,
   phase?: QuestionPreviewPhase,
-  { sanitizePaths = [] }: { sanitizePaths?: string[] } = {},
 ): QuestionPreviewDiagnostic[] {
+  const engineFailure = issues.find(isCodeCallerPoolUnavailableFailure);
+  if (engineFailure != null) {
+    throw new QuestionPreviewEngineGenerationError('Question preview worker pool is unavailable.', {
+      cause: engineFailure,
+    });
+  }
+
   return issues.map((issue) => ({
-    data: sanitizeDiagnosticValue(issue.data, sanitizePaths),
+    data: courseSource.sanitizeDiagnosticValue(issue.data),
     fatal: issue.fatal ?? false,
-    message: sanitizeDiagnosticText(issue.message, sanitizePaths),
+    message: courseSource.sanitizeDiagnosticValue(issue.message) as string,
     name: issue.name,
     phase,
   }));
 }
 
-function sanitizeDiagnosticText(text: string, sanitizePaths: string[]): string {
-  return sanitizePaths.reduce((result, unsafePath) => {
-    if (unsafePath.length === 0) return result;
-    return result.split(unsafePath).join('<course>');
-  }, text);
-}
-
-function sanitizeDiagnosticValue(value: unknown, sanitizePaths: string[]): unknown {
-  if (typeof value === 'string') return sanitizeDiagnosticText(value, sanitizePaths);
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeDiagnosticValue(item, sanitizePaths));
-  }
-  if (typeof value === 'object' && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [
-        key,
-        sanitizeDiagnosticValue(item, sanitizePaths),
-      ]),
-    );
-  }
-
-  return value;
+function isCodeCallerPoolUnavailableFailure(err: unknown): boolean {
+  if (err instanceof CodeCallerPoolUnavailableError) return true;
+  return err instanceof Error && isCodeCallerPoolUnavailableFailure(err.cause);
 }
 
 function diagnosticFromError(
   err: unknown,
-  { phase, sanitizePaths = [] }: { phase: QuestionPreviewPhase; sanitizePaths?: string[] },
+  { courseSource, phase }: { courseSource: LocalPreviewCourseSource; phase: QuestionPreviewPhase },
 ): QuestionPreviewDiagnostic {
   if (err instanceof Error) {
     const errorPhase = 'phase' in err && isQuestionPreviewPhase(err.phase) ? err.phase : phase;
 
     return {
-      data: 'data' in err ? sanitizeDiagnosticValue(err.data, sanitizePaths) : undefined,
+      data: 'data' in err ? courseSource.sanitizeDiagnosticValue(err.data) : undefined,
       fatal: 'fatal' in err && typeof err.fatal === 'boolean' ? err.fatal : true,
-      message: sanitizeDiagnosticText(err.message, sanitizePaths),
+      message: courseSource.sanitizeDiagnosticValue(err.message) as string,
       name: err.name,
       phase: errorPhase,
     };
@@ -216,15 +185,6 @@ function isQuestionPreviewPhase(value: unknown): value is QuestionPreviewPhase {
     value === 'parse' ||
     value === 'grade' ||
     value === 'render'
-  );
-}
-
-function isExpectedQuestionPreviewFailure(err: unknown) {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'expectedQuestionPreviewFailure' in err &&
-    err.expectedQuestionPreviewFailure === true
   );
 }
 
@@ -541,10 +501,7 @@ async function renderQuestionPreviewDocumentResult({
       caller,
     );
     const generateIssues = generateResult.courseIssues;
-    const sanitizePaths = [courseSource.courseDir];
-    const generateDiagnostics = diagnosticsFromIssues(generateIssues, 'generate', {
-      sanitizePaths,
-    });
+    const generateDiagnostics = diagnosticsFromIssues(generateIssues, courseSource, 'generate');
     if (generateIssues.some((issue) => issue.fatal)) {
       return makeQuestionPreviewDocumentFailureResult(generateDiagnostics);
     }
@@ -574,9 +531,7 @@ async function renderQuestionPreviewDocumentResult({
     phase = 'prepare';
     const prepareResult = await questionServer.prepare(question, course, generatedVariant, caller);
     const prepareIssues = prepareResult.courseIssues;
-    const prepareDiagnostics = diagnosticsFromIssues(prepareIssues, 'prepare', {
-      sanitizePaths,
-    });
+    const prepareDiagnostics = diagnosticsFromIssues(prepareIssues, courseSource, 'prepare');
     if (prepareIssues.some((issue) => issue.fatal)) {
       return makeQuestionPreviewDocumentFailureResult([
         ...generateDiagnostics,
@@ -674,7 +629,7 @@ async function renderQuestionPreviewDocumentResult({
           caller,
         );
         submissionDiagnostics.push(
-          ...diagnosticsFromIssues(parseResult.courseIssues, 'parse', { sanitizePaths }),
+          ...diagnosticsFromIssues(parseResult.courseIssues, courseSource, 'parse'),
         );
         if (parseResult.courseIssues.some((issue) => issue.fatal)) {
           return makeQuestionPreviewDocumentFailureResult([
@@ -711,7 +666,7 @@ async function renderQuestionPreviewDocumentResult({
             caller,
           );
           submissionDiagnostics.push(
-            ...diagnosticsFromIssues(gradeResult.courseIssues, 'grade', { sanitizePaths }),
+            ...diagnosticsFromIssues(gradeResult.courseIssues, courseSource, 'grade'),
           );
           if (gradeResult.courseIssues.some((issue) => issue.fatal)) {
             return makeQuestionPreviewDocumentFailureResult([
@@ -781,9 +736,11 @@ async function renderQuestionPreviewDocumentResult({
       variant: preparedVariant,
       caller,
     });
-    const renderDiagnostics = diagnosticsFromIssues(renderResult.courseIssues, 'render', {
-      sanitizePaths,
-    });
+    const renderDiagnostics = diagnosticsFromIssues(
+      renderResult.courseIssues,
+      courseSource,
+      'render',
+    );
     if (renderResult.courseIssues.some((issue) => issue.fatal)) {
       return makeQuestionPreviewDocumentFailureResult([
         ...generateDiagnostics,
@@ -843,9 +800,15 @@ async function renderQuestionPreviewDocumentResult({
       headHtml: shellHeadHtml,
     });
   } catch (err) {
-    if (!isExpectedQuestionPreviewFailure(err)) throw err;
+    if (err instanceof QuestionPreviewEngineGenerationError) throw err;
+    if (isCodeCallerPoolUnavailableFailure(err)) {
+      throw new QuestionPreviewEngineGenerationError(
+        'Question preview worker pool is unavailable.',
+        { cause: err },
+      );
+    }
     return makeQuestionPreviewDocumentFailureResult([
-      diagnosticFromError(err, { phase, sanitizePaths: [courseSource.courseDir] }),
+      diagnosticFromError(err, { courseSource, phase }),
     ]);
   }
 }

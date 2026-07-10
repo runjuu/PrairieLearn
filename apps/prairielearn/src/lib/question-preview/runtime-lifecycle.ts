@@ -67,43 +67,6 @@ function makeRuntimeStartupOptions({
   };
 }
 
-class OwnedQuestionPreviewRuntime implements QuestionPreviewRuntimeLifecycle {
-  readonly localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
-  readonly localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
-  readonly localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
-  readonly urlPrefix: string;
-
-  constructor({
-    localPreviewGeneratedFiles,
-    localPreviewSubmissionFiles,
-    localPreviewWorkspaces,
-    runtime,
-    urlPrefix,
-  }: {
-    localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
-    localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
-    localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
-    runtime: QuestionPreviewRuntime;
-    urlPrefix: string;
-  }) {
-    this.localPreviewGeneratedFiles = localPreviewGeneratedFiles;
-    this.localPreviewSubmissionFiles = localPreviewSubmissionFiles;
-    this.localPreviewWorkspaces = localPreviewWorkspaces;
-    this.urlPrefix = urlPrefix;
-    this.runtime = runtime;
-  }
-
-  private readonly runtime: QuestionPreviewRuntime;
-
-  async render(input: QuestionPreviewDocumentInput) {
-    return this.runtime.render(input);
-  }
-
-  async close() {
-    await this.runtime.close();
-  }
-}
-
 export async function createQuestionPreviewRuntimeLifecycle({
   createRuntime,
   localPreviewGeneratedFilesMax,
@@ -125,11 +88,13 @@ export async function createQuestionPreviewRuntimeLifecycle({
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
   });
 
-  return new OwnedQuestionPreviewRuntime({
+  const runtime = await createRuntime(runtimeStartupOptions);
+  return {
+    close: () => runtime.close(),
     localPreviewGeneratedFiles,
     localPreviewSubmissionFiles,
     localPreviewWorkspaces,
-    runtime: await createRuntime(runtimeStartupOptions),
+    render: (input: QuestionPreviewDocumentInput) => runtime.render(input),
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
-  });
+  };
 }

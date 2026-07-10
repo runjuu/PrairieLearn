@@ -5,12 +5,15 @@ import path from 'node:path';
 
 import { assert, describe, it } from 'vitest';
 
+import { CodeCallerPoolUnavailableError } from '../code-caller/code-caller-shared.js';
+
 import { type LocalPreviewCourseSource, createLocalPreviewCourseSource } from './course-source.js';
 import {
   type QuestionPreviewDocumentRenderer,
   type QuestionPreviewRenderMode,
   createQuestionPreviewDocumentRenderer,
 } from './document.js';
+import { QuestionPreviewEngineGenerationError } from './engine-error.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 import { createQuestionPreviewRuntime } from './render.js';
@@ -186,12 +189,13 @@ describe('question preview document', () => {
         title: 'Question preview tests',
       },
       readQuestionInfo: async () => {
-        throw new Error('worker-pool generation failed');
+        throw new CodeCallerPoolUnavailableError('CodeCaller pool not initialized');
       },
       readTemplateInfo: async () => {
         throw new Error('not used');
       },
-      resolveFile: async () => null,
+      resolveResource: async () => null,
+      sanitizeDiagnosticValue: (value) => value,
     };
     const renderer = createQuestionPreviewDocumentRenderer({
       courseSource,
@@ -202,8 +206,41 @@ describe('question preview document', () => {
 
     await nodeAssert.rejects(
       renderer.render({ qid: parsePreviewQid('demo/question') }),
-      /worker-pool generation failed/,
+      QuestionPreviewEngineGenerationError,
     );
+  });
+
+  it('returns ordinary course failures as structured render results', async () => {
+    const courseSource: LocalPreviewCourseSource = {
+      courseDir: '/course',
+      courseMetadata: {
+        name: 'TST 101',
+        options: {},
+        timezone: 'UTC',
+        title: 'Question preview tests',
+      },
+      readQuestionInfo: async () => {
+        throw new Error('Failed to read /course/questions/demo/info.json');
+      },
+      readTemplateInfo: async () => {
+        throw new Error('not used');
+      },
+      resolveResource: async () => null,
+      sanitizeDiagnosticValue: (value) =>
+        typeof value === 'string' ? value.replaceAll('/course', '<course>') : value,
+    };
+    const renderer = createQuestionPreviewDocumentRenderer({
+      courseSource,
+      localPreviewGeneratedFiles: new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' }),
+      localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
+      urlPrefix: '/preview',
+    });
+
+    const result = await renderer.render({ qid: parsePreviewQid('demo/question') });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics[0].phase, 'metadata');
+    assert.equal(result.diagnostics[0].message, 'Failed to read <course>/questions/demo/info.json');
   });
 
   it('renders a complete Question preview document through the document seam', async () => {
@@ -395,7 +432,8 @@ describe('question preview document', () => {
       readTemplateInfo: async () => {
         throw new Error('template lookup should not occur for an invalid seed');
       },
-      resolveFile: async () => null,
+      resolveResource: async () => null,
+      sanitizeDiagnosticValue: (value) => value,
     };
     const renderer = createQuestionPreviewDocumentRenderer({
       courseSource,
