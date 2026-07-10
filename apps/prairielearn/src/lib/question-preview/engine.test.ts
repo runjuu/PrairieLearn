@@ -22,6 +22,9 @@ function makeCourseSource(name: string): LocalPreviewCourseSource {
     readTemplateInfo: async () => {
       throw new Error('not used by the fake engine generation');
     },
+    resolveLegacyQuestionFile: async () => {
+      throw new Error('not used by the fake engine generation');
+    },
     resolveResource: async () => null,
     sanitizeDiagnosticValue: (value) => value,
   };
