@@ -114,3 +114,6 @@ export function createTest(configOverrides?: Partial<Config>) {
 }
 
 export const test = createTest();
+
+/** Base Playwright fixture for self-contained servers that do not use the full PrairieLearn app. */
+export const standaloneTest = base;

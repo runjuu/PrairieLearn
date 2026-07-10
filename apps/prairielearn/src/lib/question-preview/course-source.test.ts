@@ -154,6 +154,56 @@ describe('Local Preview Course Source', () => {
     }
   });
 
+  it('resolves inherited legacy files through bounded on-disk template metadata', async () => {
+    const courseDir = await makeCourseRoot({
+      name: 'TST 101',
+      title: 'Preview source testing',
+      topics: [{ color: 'blue1', name: 'Testing' }],
+    });
+    const questionDir = path.join(courseDir, 'questions', 'legacy', 'question');
+    const templateDir = path.join(courseDir, 'questions', 'legacy', 'template');
+    await fs.mkdir(questionDir, { recursive: true });
+    await fs.mkdir(templateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(questionDir, 'info.json'),
+      JSON.stringify({
+        template: 'legacy/template',
+        title: 'Inherited legacy question',
+        topic: 'Testing',
+        type: 'Calculation',
+        uuid: '11111111-1111-4111-8111-111111111163',
+      }),
+    );
+    await fs.writeFile(
+      path.join(templateDir, 'info.json'),
+      JSON.stringify({
+        title: 'Legacy template',
+        topic: 'Testing',
+        type: 'Calculation',
+        uuid: '11111111-1111-4111-8111-111111111164',
+      }),
+    );
+    const inheritedServerPath = path.join(templateDir, 'server.js');
+    await fs.writeFile(inheritedServerPath, 'inherited server');
+    const qidResult = parseQuestionPreviewQid('legacy/question');
+    if (!qidResult.ok) throw new Error(qidResult.error.message);
+
+    try {
+      const source = await createLocalPreviewCourseSource(courseDir);
+      const info = await source.readQuestionInfo(qidResult.qid);
+      const resolved = await source.resolveLegacyQuestionFile({
+        filename: 'server.js',
+        info,
+        qid: qidResult.qid,
+      });
+
+      assert.equal(resolved.fullPath, await fs.realpath(inheritedServerPath));
+      assert.equal(resolved.rootPath, await fs.realpath(templateDir));
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('rejects question metadata reached through an escaping symlink', async () => {
     const courseDir = await makeCourseRoot({
       name: 'TST 101',

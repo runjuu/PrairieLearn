@@ -8,9 +8,10 @@ import {
   type QuestionJson,
   QuestionJsonSchema,
 } from '../../schemas/index.js';
+import { resolveLegacyQuestionFilePath } from '../legacy-question-file.js';
 
 import { ExpectedQuestionPreviewError } from './expected-error.js';
-import type { QuestionPreviewQid } from './qid.js';
+import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 
 export interface LocalPreviewCourseMetadata {
   name: string;
@@ -30,6 +31,11 @@ export interface LocalPreviewCourseSource {
   courseMetadata: LocalPreviewCourseMetadata;
   readQuestionInfo(qid: QuestionPreviewQid): Promise<QuestionJson>;
   readTemplateInfo(qid: QuestionPreviewQid): Promise<QuestionJson>;
+  resolveLegacyQuestionFile(input: {
+    filename: string;
+    info: QuestionJson;
+    qid: QuestionPreviewQid;
+  }): Promise<{ effectiveFilename: string; fullPath: string; rootPath: string }>;
   resolveResource(resource: LocalPreviewCourseResource): Promise<string | null>;
   sanitizeDiagnosticValue(value: unknown): unknown;
 }
@@ -220,6 +226,29 @@ export async function createLocalPreviewCourseSource(
     },
     async readTemplateInfo(qid) {
       return source.readQuestionInfo(qid);
+    },
+    async resolveLegacyQuestionFile({ filename, info, qid }) {
+      return resolveLegacyQuestionFilePath({
+        coursePath: courseDir,
+        filename,
+        lookupTemplate: async ({ directory }) => {
+          const templateQidResult = parseQuestionPreviewQid(directory);
+          if (!templateQidResult.ok) return null;
+          const templateInfo = await source.readTemplateInfo(templateQidResult.qid);
+          return {
+            courseId: '1',
+            directory,
+            templateDirectory: templateInfo.template ?? null,
+            type: templateInfo.type,
+          };
+        },
+        question: {
+          courseId: '1',
+          directory: qid.decoded,
+          templateDirectory: info.template ?? null,
+          type: info.type,
+        },
+      });
     },
     async resolveResource(resource) {
       const rootPathSegments = resourceRootPathSegments(resource);

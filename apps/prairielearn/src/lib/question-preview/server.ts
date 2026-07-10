@@ -15,6 +15,7 @@ import asyncHandler from 'express-async-handler';
 
 import * as assets from '../assets.js';
 import { guessMimeType } from '../mime-type.js';
+import { APP_ROOT_PATH } from '../paths.js';
 
 import { createQuestionPreviewAssetResolver } from './assets.js';
 import { type LocalPreviewCourseSource, createLocalPreviewCourseSource } from './course-source.js';
@@ -484,6 +485,10 @@ function createQuestionPreviewApp({
   app.enable('strict routing');
 
   assets.applyMiddleware(app);
+  app.use(
+    '/localscripts/calculationQuestion',
+    express.static(path.join(APP_ROOT_PATH, 'public/localscripts/calculationQuestion')),
+  );
 
   app.use((_req, res, next) => {
     res.set('cache-control', 'no-store');

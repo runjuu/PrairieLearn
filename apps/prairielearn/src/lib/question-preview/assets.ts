@@ -87,9 +87,9 @@ function decodeSafeUrlPathSegments(encodedPath: string) {
   return decodedSegments;
 }
 
-interface BoundedAssetRequest {
-  resource: LocalPreviewCourseResource;
-}
+type BoundedAssetRequest =
+  | { resource: LocalPreviewCourseResource }
+  | { legacyQuestionFile: { filename: string; qid: QuestionPreviewQid } };
 
 function withUrlPrefix(urlPrefix: string, pathPrefix: string) {
   return `${urlPrefix}${pathPrefix}`;
@@ -121,6 +121,20 @@ function startupCourseAssetRequestFromPathname({
   if (pathname.startsWith(questionFilesPrefix)) {
     const segments = decodeSafeUrlPathSegments(pathname.slice(questionFilesPrefix.length));
     if (segments == null) return null;
+
+    const legacyFilesSegmentIndex = segments.lastIndexOf('legacy-files');
+    if (legacyFilesSegmentIndex > 0 && legacyFilesSegmentIndex === segments.length - 2) {
+      const qidResult = questionPreviewQidFromPathSegments(
+        segments.slice(0, legacyFilesSegmentIndex),
+      );
+      if (!qidResult.ok) return null;
+      return {
+        legacyQuestionFile: {
+          filename: segments[legacyFilesSegmentIndex + 1],
+          qid: qidResult.qid,
+        },
+      };
+    }
 
     const filesSegmentIndex = segments.lastIndexOf('files');
     if (filesSegmentIndex <= 0 || filesSegmentIndex === segments.length - 1) return null;
@@ -168,6 +182,18 @@ export function createQuestionPreviewAssetResolver({
       });
 
       if (assetRequest == null) return null;
+      if ('legacyQuestionFile' in assetRequest) {
+        const { filename, qid } = assetRequest.legacyQuestionFile;
+        const info = await courseSource.readQuestionInfo(qid);
+        if (info.type === 'v3' || !info.clientFiles.includes(filename)) return null;
+        return (
+          await courseSource.resolveLegacyQuestionFile({
+            filename,
+            info,
+            qid,
+          })
+        ).fullPath;
+      }
       return courseSource.resolveResource(assetRequest.resource);
     },
     async resolveGeneratedFile(pathname: string) {

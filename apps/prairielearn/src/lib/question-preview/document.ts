@@ -9,7 +9,7 @@ import { HeadContents } from '../../components/HeadContents.js';
 import { QuestionTitle } from '../../components/QuestionContainer.js';
 import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { type SubmissionForRender, SubmissionPanel } from '../../components/SubmissionPanel.js';
-import * as questionServers from '../../question-servers/index.js';
+import type * as questionServers from '../../question-servers/index.js';
 import { CodeCallerPoolUnavailableError } from '../code-caller/code-caller-shared.js';
 import { config } from '../config.js';
 import type { Course, Question, Submission, Variant } from '../db-types.js';
@@ -26,6 +26,10 @@ import {
   makeLocalPreviewVariant,
   makePreviewWorkspaceSettings,
 } from './rows.js';
+import {
+  type QuestionPreviewSourceQuestionTypeAdapter,
+  createQuestionPreviewSourceQuestionTypeAdapter,
+} from './source-question-type-adapter.js';
 import { type LocalPreviewSubmissionFiles, type PreviewSubmittedFile } from './submission-files.js';
 import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 
@@ -262,6 +266,8 @@ function renderQuestionPreviewBodyHtml({
   checkAnswerSupported,
   course,
   question,
+  questionAdapter,
+  questionJsonBase64,
   questionHtml,
   showCorrectAnswer,
   submissionPanel,
@@ -273,6 +279,8 @@ function renderQuestionPreviewBodyHtml({
   checkAnswerSupported: boolean;
   course: Course;
   question: Question;
+  questionAdapter: QuestionPreviewSourceQuestionTypeAdapter;
+  questionJsonBase64: string | null;
   questionHtml: string;
   showCorrectAnswer: boolean;
   submissionPanel: QuestionPreviewSubmissionPanel | null;
@@ -287,7 +295,11 @@ function renderQuestionPreviewBodyHtml({
       data-variant-id="${variant.id}"
       data-variant-token="${variantToken}"
       data-workspace-id="${variant.workspace_id ?? ''}"
+      data-question-type="${question.type}"
     >
+      ${questionJsonBase64 == null
+        ? ''
+        : html`<div hidden class="question-data">${questionJsonBase64}</div>`}
       <form class="question-form" name="question-form" method="POST" autocomplete="off">
         <div class="card mb-3 question-block">
           <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
@@ -302,8 +314,9 @@ function renderQuestionPreviewBodyHtml({
                   <button
                     type="submit"
                     class="btn btn-primary question-grade disable-on-submit"
-                    name="__action"
-                    value="grade"
+                    ${questionAdapter.kind === 'freeform'
+                      ? html`name="__action" value="grade"`
+                      : ''}
                   >
                     Save &amp; Grade
                   </button>
@@ -313,6 +326,12 @@ function renderQuestionPreviewBodyHtml({
                     value="${variant.id}"
                     data-skip-unload-check="true"
                   />
+                  ${questionAdapter.kind === 'legacy'
+                    ? html`
+                        <input type="hidden" name="postData" class="postData" />
+                        <input type="hidden" name="__action" class="__action" />
+                      `
+                    : ''}
                 `
               : html`
                   <p class="small text-muted mb-0">
@@ -346,9 +365,13 @@ function renderQuestionPreviewBodyHtml({
 
 function renderQuestionOnlyPreviewBodyHtml({
   questionHtml,
+  questionJsonBase64,
+  questionType,
   variant,
 }: {
   questionHtml: string;
+  questionJsonBase64: string | null;
+  questionType: Question['type'];
   variant: Variant;
 }): string {
   return html`
@@ -356,7 +379,11 @@ function renderQuestionOnlyPreviewBodyHtml({
       class="question-container"
       data-variant-id="${variant.id}"
       data-workspace-id="${variant.workspace_id ?? ''}"
+      data-question-type="${questionType}"
     >
+      ${questionJsonBase64 == null
+        ? ''
+        : html`<div hidden class="question-data">${questionJsonBase64}</div>`}
       <div class="question-body">${unsafeHtml(questionHtml)}</div>
     </div>
   `.toString();
@@ -479,17 +506,13 @@ async function renderQuestionPreviewDocumentResult({
       qid,
     });
 
-    if (question.type !== 'Freeform') {
-      throw new ExpectedQuestionPreviewError(
-        `Unsupported preview question type: ${question.type ?? 'null'}. Only v3/Freeform questions can be rendered by the local preview server.`,
-        {
-          data: { qid: qid.decoded, questionType: question.type },
-          phase: 'metadata',
-        },
-      );
-    }
-
-    const questionServer = questionServers.getModule(question.type);
+    const questionAdapter = createQuestionPreviewSourceQuestionTypeAdapter({
+      courseSource,
+      info,
+      qid,
+      question,
+    });
+    const questionServer = questionAdapter.questionServer;
     const preferences: Record<string, string | number | boolean> = {};
 
     phase = 'generate';
@@ -584,7 +607,9 @@ async function renderQuestionPreviewDocumentResult({
         unsupportedGradingMethod = true;
       } else {
         phase = 'parse';
-        const rawSubmittedAnswer = submissionInput.rawSubmittedAnswer;
+        const rawSubmittedAnswer = questionAdapter.normalizeSubmittedAnswer(
+          submissionInput.rawSubmittedAnswer,
+        );
 
         // Mirrors `saveSubmission` in the full server: the workspace's graded
         // files are injected into `submitted_answer._files` before parsing,
@@ -761,6 +786,15 @@ async function renderQuestionPreviewDocumentResult({
           };
 
     const extraHeadersHtml = renderResult.data.extraHeadersHtml;
+    const questionJsonBase64 = questionAdapter.makeLegacyQuestionJsonBase64({
+      course,
+      generatedFilesUrl: localPreviewVariantIdentity.generatedFilesUrl,
+      questionFileUrl: `${urlPrefix}/questions/${qid.encodedPath}/legacy-files`,
+      showCorrectAnswer,
+      submission,
+      submissions: submission == null ? [] : [submission],
+      variant: preparedVariant,
+    });
     const shellHeadHtml = renderQuestionPreviewShellHeadHtml({
       extraHeadersHtml,
       pageTitle: question.title?.trim() || qid.decoded,
@@ -771,6 +805,8 @@ async function renderQuestionPreviewDocumentResult({
       renderMode === 'question-only'
         ? renderQuestionOnlyPreviewBodyHtml({
             questionHtml: renderResult.data.questionHtml,
+            questionJsonBase64,
+            questionType: question.type,
             variant: preparedVariant,
           })
         : renderQuestionPreviewBodyHtml({
@@ -778,7 +814,9 @@ async function renderQuestionPreviewDocumentResult({
             checkAnswerSupported,
             course,
             question,
+            questionAdapter,
             questionHtml: renderResult.data.questionHtml,
+            questionJsonBase64,
             showCorrectAnswer,
             submissionPanel,
             urlPrefix,
