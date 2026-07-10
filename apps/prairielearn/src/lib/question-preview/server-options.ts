@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import minimist from 'minimist';
@@ -21,9 +20,7 @@ const DEFAULT_WORKSPACE_START_TIMEOUT_MS = 60 * 1000;
 
 const SUPPORTED_FLAGS = new Set([
   '_',
-  'cache-type',
   'course-dir',
-  'dev-mode',
   'host',
   'port',
   'question-timeout-ms',
@@ -41,15 +38,16 @@ const SUPPORTED_FLAGS = new Set([
 ]);
 
 export interface QuestionPreviewServerHttpOptions {
-  courseDir: string;
   host: string;
   port: number;
   renderMode: QuestionPreviewRenderMode;
 }
 
-export interface QuestionPreviewServerRuntimeOptions extends QuestionPreviewRuntimeLifecycleStartupOptions {
+export interface QuestionPreviewServerRuntimeOptions extends Omit<
+  QuestionPreviewRuntimeLifecycleStartupOptions,
+  'courseDir' | 'courseSource'
+> {
   cacheType: QuestionPreviewCacheType;
-  courseDir: string;
   devMode: boolean;
   questionTimeoutMilliseconds: number;
   renderMode: QuestionPreviewRenderMode;
@@ -72,7 +70,9 @@ export interface QuestionPreviewServerOptions
   extends
     QuestionPreviewServerHttpOptions,
     QuestionPreviewServerRuntimeOptions,
-    QuestionPreviewServerWorkspaceOptions {}
+    QuestionPreviewServerWorkspaceOptions {
+  courseDirs: string[];
+}
 
 function addIssue(ctx: z.RefinementCtx, message: string): never {
   ctx.addIssue({ code: 'custom', message });
@@ -93,17 +93,14 @@ function singleStringFlagSchema(flagName: string) {
   });
 }
 
-function requiredSingleStringFlagSchema(flagName: string, missingMessage: string) {
-  return z.unknown().transform((value, ctx): string => {
-    if (value == null) {
-      return addIssue(ctx, missingMessage);
+function repeatableStringFlagSchema(flagName: string) {
+  return z.unknown().transform((value, ctx): string[] => {
+    if (value == null) return [];
+    const values = Array.isArray(value) ? value : [value];
+    if (values.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+      return addIssue(ctx, `Invalid --${flagName}. Expected one non-empty value per flag.`);
     }
-
-    if (typeof value !== 'string' || value.length === 0) {
-      return addIssue(ctx, `Invalid --${flagName}. Expected exactly one non-empty value.`);
-    }
-
-    return value;
+    return values as string[];
   });
 }
 
@@ -149,23 +146,11 @@ function parseWorkersExecutionMode(
   return mode;
 }
 
-function parseCacheType(value: string | undefined, ctx: z.RefinementCtx): QuestionPreviewCacheType {
-  const cacheType = value ?? 'none';
-  if (cacheType !== 'none' && cacheType !== 'memory' && cacheType !== 'redis') {
-    return addIssue(
-      ctx,
-      `Invalid --cache-type "${cacheType}". Expected "none", "memory", or "redis".`,
-    );
-  }
-
-  return cacheType;
-}
-
 function parseRenderMode(
   value: string | undefined,
   ctx: z.RefinementCtx,
 ): QuestionPreviewRenderMode {
-  const renderMode = value ?? 'full';
+  const renderMode = value ?? 'question-only';
   if (renderMode !== 'full' && renderMode !== 'question-only') {
     return addIssue(
       ctx,
@@ -192,12 +177,9 @@ function parseWorkspacePullPolicy(
 }
 
 const QuestionPreviewServerOptionsSchema = z.object({
-  cacheType: singleStringFlagSchema('cache-type').transform(parseCacheType),
-  courseDir: requiredSingleStringFlagSchema(
-    'course-dir',
-    'Missing required --course-dir <path> for the local preview server.',
-  ).transform((courseDir) => path.resolve(courseDir)),
-  devMode: z.boolean(),
+  courseDirs: repeatableStringFlagSchema('course-dir').transform((courseDirs) =>
+    courseDirs.map((courseDir) => path.resolve(courseDir)),
+  ),
   host: singleStringFlagSchema('host').transform((host) => host ?? DEFAULT_HOST),
   port: singleStringFlagSchema('port').transform(parsePort),
   questionTimeoutMilliseconds: singleStringFlagSchema('question-timeout-ms').transform(
@@ -247,26 +229,16 @@ const QuestionPreviewServerOptionsSchema = z.object({
   workspacesEnabled: z.boolean(),
 });
 
-async function assertValidCourseDir(courseDir: string) {
-  try {
-    const stat = await fs.stat(courseDir);
-    if (!stat.isDirectory()) throw new Error('not a directory');
-    const questionsStat = await fs.stat(path.join(courseDir, 'questions'));
-    if (!questionsStat.isDirectory()) throw new Error('missing questions directory');
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid --course-dir "${courseDir}": ${detail}`, { cause: err });
-  }
-}
-
 export async function parseQuestionPreviewServerOptions(
   argvInput: string[],
 ): Promise<QuestionPreviewServerOptions> {
+  if (argvInput.includes('--no-workspaces')) {
+    throw new Error('Unsupported preview-server flag(s): no-workspaces.');
+  }
   const argv = minimist(argvInput, {
-    boolean: ['dev-mode', 'workspaces'],
-    default: { workspaces: true },
+    boolean: ['workspaces'],
+    default: { workspaces: false },
     string: [
-      'cache-type',
       'course-dir',
       'host',
       'port',
@@ -294,9 +266,7 @@ export async function parseQuestionPreviewServerOptions(
   }
 
   const parsed = QuestionPreviewServerOptionsSchema.safeParse({
-    cacheType: argv['cache-type'],
-    courseDir: argv['course-dir'],
-    devMode: argv['dev-mode'],
+    courseDirs: argv['course-dir'],
     host: argv.host,
     port: argv.port,
     questionTimeoutMilliseconds: argv['question-timeout-ms'],
@@ -317,15 +287,13 @@ export async function parseQuestionPreviewServerOptions(
     throw new Error(parsed.error.issues.map((issue) => issue.message).join('\n'));
   }
 
-  await assertValidCourseDir(parsed.data.courseDir);
-  return parsed.data;
+  return { ...parsed.data, cacheType: 'none', devMode: false };
 }
 
 export function getQuestionPreviewServerHttpOptions(
   options: QuestionPreviewServerOptions,
 ): QuestionPreviewServerHttpOptions {
   return {
-    courseDir: options.courseDir,
     host: options.host,
     port: options.port,
     renderMode: options.renderMode,
@@ -337,7 +305,6 @@ export function getQuestionPreviewServerRuntimeOptions(
 ): QuestionPreviewServerRuntimeOptions {
   return {
     cacheType: options.cacheType,
-    courseDir: options.courseDir,
     devMode: options.devMode,
     questionTimeoutMilliseconds: options.questionTimeoutMilliseconds,
     renderMode: options.renderMode,

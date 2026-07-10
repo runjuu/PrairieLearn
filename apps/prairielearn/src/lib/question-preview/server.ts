@@ -1,5 +1,7 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import type { IncomingMessage, Server } from 'node:http';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import type { Duplex } from 'node:stream';
@@ -8,6 +10,7 @@ import { omit } from 'es-toolkit';
 import express, {
   type ErrorRequestHandler,
   type Express,
+  type NextFunction,
   type Request,
   type Response,
 } from 'express';
@@ -18,8 +21,13 @@ import { guessMimeType } from '../mime-type.js';
 import { APP_ROOT_PATH } from '../paths.js';
 
 import { createQuestionPreviewAssetResolver } from './assets.js';
-import { type LocalPreviewCourseSource, createLocalPreviewCourseSource } from './course-source.js';
+import {
+  InvalidLocalPreviewCourseError,
+  type LocalPreviewCourseSource,
+  createLocalPreviewCourseSource,
+} from './course-source.js';
 import type { QuestionPreviewRenderMode } from './document.js';
+import type { QuestionPreviewEngineLifecycle } from './engine.js';
 import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import {
   type QuestionPreviewHttpAction,
@@ -37,11 +45,20 @@ import {
   mapQuestionPreviewWorkspacePageResponse,
   mapQuestionPreviewWorkspaceStatusResponse,
 } from './http-response.js';
+import {
+  LocalPreviewSessionCatalog,
+  type LocalPreviewSessionDescriptor,
+} from './local-preview-session.js';
 import { parseQuestionPreviewQid } from './qid.js';
-import type { QuestionPreviewRuntime, QuestionPreviewStartupLogger } from './render.js';
+import {
+  type QuestionPreviewRuntime,
+  type QuestionPreviewStartupLogger,
+  createQuestionPreviewEngine,
+} from './render.js';
 import {
   type QuestionPreviewRuntimeFactory,
   type QuestionPreviewRuntimeLifecycle,
+  createQuestionPreviewCourseRuntimeLifecycle,
   createQuestionPreviewRuntimeLifecycle,
 } from './runtime-lifecycle.js';
 import {
@@ -75,10 +92,14 @@ type PreviewWorkspaceManagerFactory = (
 export interface StartedQuestionPreviewServer {
   close(): Promise<void>;
   options: QuestionPreviewServerOptions;
-  runtime: QuestionPreviewRuntime;
   server: Server;
+  startupSessions: LocalPreviewSessionDescriptor[];
   workspaceManager: PreviewWorkspaceManager | null;
 }
+
+const PRAIRIELEARN_VERSION = (
+  createRequire(import.meta.url)('../../../package.json') as { version: string }
+).version;
 
 /**
  * Resolves once the server returned by Express is accepting requests.
@@ -111,6 +132,39 @@ function rawRequestPathname(req: IncomingMessage) {
   const rawUrl = req.url ?? '/';
   const queryStart = rawUrl.search(/[?#]/);
   return queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
+}
+
+function rawOriginalRequestPathname(req: Request) {
+  const queryStart = req.originalUrl.search(/[?#]/);
+  return queryStart === -1 ? req.originalUrl : req.originalUrl.slice(0, queryStart);
+}
+
+function questionQidFromRawPath(req: Request, sessionPrefix: string) {
+  const questionPrefix = `${sessionPrefix}/questions/`;
+  const pathname = rawOriginalRequestPathname(req);
+  if (!pathname.startsWith(questionPrefix)) return null;
+
+  const decodedSegments: string[] = [];
+  for (const encodedSegment of pathname.slice(questionPrefix.length).split('/')) {
+    let segment: string;
+    try {
+      segment = decodeURIComponent(encodedSegment);
+    } catch {
+      return null;
+    }
+    if (
+      segment.length === 0 ||
+      segment === '.' ||
+      segment === '..' ||
+      segment.includes('/') ||
+      segment.includes('\\') ||
+      segment.includes('\0')
+    ) {
+      return null;
+    }
+    decodedSegments.push(segment);
+  }
+  return decodedSegments.join('/');
 }
 
 async function sendQuestionPreviewHttpResponse(
@@ -181,13 +235,18 @@ async function handleQuestionPreviewAssetRequest(
 function registerQuestionPreviewAssetRoutes(
   app: Express,
   assetResolver: QuestionPreviewAssetResolver,
+  sessionPrefix = '',
 ) {
   for (const routePattern of assetResolver.routePatterns) {
     app
-      .route(routePattern)
+      .route(routePattern.slice(sessionPrefix.length))
       .get(
         asyncHandler(async (req, res) => {
-          await handleQuestionPreviewAssetRequest(res, assetResolver, rawRequestPathname(req));
+          await handleQuestionPreviewAssetRequest(
+            res,
+            assetResolver,
+            sessionPrefix === '' ? rawRequestPathname(req) : rawOriginalRequestPathname(req),
+          );
         }),
       )
       .all((_req, res) => {
@@ -224,14 +283,15 @@ async function handleQuestionPreviewSubmissionFileRequest(
 function registerQuestionPreviewSubmissionFileRoutes(
   app: Express,
   localPreviewSubmissionFiles: LocalPreviewSubmissionFiles,
+  sessionPrefix = '',
 ) {
   app.get(
-    localPreviewSubmissionFiles.routePattern,
+    localPreviewSubmissionFiles.routePattern.slice(sessionPrefix.length),
     asyncHandler(async (req, res) => {
       await handleQuestionPreviewSubmissionFileRequest(
         res,
         localPreviewSubmissionFiles,
-        rawRequestPathname(req),
+        sessionPrefix === '' ? rawRequestPathname(req) : rawOriginalRequestPathname(req),
       );
     }),
   );
@@ -456,6 +516,7 @@ interface CreateQuestionPreviewAppParams {
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   runtime: QuestionPreviewRuntime;
+  sessionPrefix: string;
   urlPrefix: string;
   workspaceManager: PreviewWorkspaceManager | null;
 }
@@ -471,6 +532,7 @@ function createQuestionPreviewApp({
   localPreviewGeneratedFiles,
   localPreviewSubmissionFiles,
   runtime,
+  sessionPrefix,
   urlPrefix,
   workspaceManager,
 }: CreateQuestionPreviewAppParams) {
@@ -483,17 +545,6 @@ function createQuestionPreviewApp({
 
   app.disable('x-powered-by');
   app.enable('strict routing');
-
-  assets.applyMiddleware(app);
-  app.use(
-    '/localscripts/calculationQuestion',
-    express.static(path.join(APP_ROOT_PATH, 'public/localscripts/calculationQuestion')),
-  );
-
-  app.use((_req, res, next) => {
-    res.set('cache-control', 'no-store');
-    next();
-  });
 
   let workspaceUpgradeHandler:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
@@ -511,10 +562,10 @@ function createQuestionPreviewApp({
   app.get(
     '/questions/*',
     asyncHandler(async (req, res) => {
-      const qid = req.params[0];
+      const qid = questionQidFromRawPath(req, sessionPrefix);
 
       if (!qid) {
-        res.status(404).end();
+        await sendQuestionPreviewHttpAction(res, mapQuestionPreviewInvalidQidResponse());
         return;
       }
 
@@ -529,8 +580,11 @@ function createQuestionPreviewApp({
   );
 
   if (httpOptions.renderMode === 'question-only') {
-    app.post('/questions/*', (_req, res) => {
-      void sendQuestionPreviewHttpAction(res, mapQuestionPreviewGradingDisabledResponse());
+    app.post('/questions/*', (req, res) => {
+      const response = questionQidFromRawPath(req, sessionPrefix)
+        ? mapQuestionPreviewGradingDisabledResponse()
+        : mapQuestionPreviewInvalidQidResponse();
+      void sendQuestionPreviewHttpAction(res, response);
     });
   } else {
     app.post(
@@ -538,10 +592,10 @@ function createQuestionPreviewApp({
       // Mirrors the submission body limits of the full PrairieLearn server.
       express.urlencoded({ extended: false, limit: 5 * 1536 * 1024 }),
       asyncHandler(async (req, res) => {
-        const qid = req.params[0];
+        const qid = questionQidFromRawPath(req, sessionPrefix);
 
         if (!qid) {
-          res.status(404).end();
+          await sendQuestionPreviewHttpAction(res, mapQuestionPreviewInvalidQidResponse());
           return;
         }
 
@@ -557,8 +611,8 @@ function createQuestionPreviewApp({
     );
   }
 
-  registerQuestionPreviewAssetRoutes(app, assetResolver);
-  registerQuestionPreviewSubmissionFileRoutes(app, localPreviewSubmissionFiles);
+  registerQuestionPreviewAssetRoutes(app, assetResolver, sessionPrefix);
+  registerQuestionPreviewSubmissionFileRoutes(app, localPreviewSubmissionFiles, sessionPrefix);
 
   app.use((_req, res) => {
     res.status(404).end();
@@ -571,7 +625,8 @@ function createQuestionPreviewApp({
 
 interface StartQuestionPreviewServerParams {
   argv: string[];
-  createRuntime: QuestionPreviewRuntimeFactory;
+  createEngine?: typeof createQuestionPreviewEngine;
+  createRuntime?: QuestionPreviewRuntimeFactory;
   createWorkspaceManager?: PreviewWorkspaceManagerFactory;
   localPreviewGeneratedFilesMax?: number;
   startupLogger?: QuestionPreviewStartupLogger;
@@ -583,40 +638,32 @@ interface StartQuestionPreviewServerParams {
  */
 export async function startQuestionPreviewServer({
   argv,
+  createEngine = createQuestionPreviewEngine,
   createRuntime,
   createWorkspaceManager = createPreviewWorkspaceManager,
   localPreviewGeneratedFilesMax,
   startupLogger,
 }: StartQuestionPreviewServerParams): Promise<StartedQuestionPreviewServer> {
   startupLogger?.('Reading preview server options.');
-  const parsedOptions = await parseQuestionPreviewServerOptions(argv);
-  const courseSource = await createLocalPreviewCourseSource(parsedOptions.courseDir);
-  const options = { ...parsedOptions, courseDir: courseSource.courseDir };
-  startupLogger?.(`Validated course directory: ${options.courseDir}.`);
-
+  const options = await parseQuestionPreviewServerOptions(argv);
   const httpOptions = getQuestionPreviewServerHttpOptions(options);
   const runtimeOptions = getQuestionPreviewServerRuntimeOptions(options);
   const workspaceOptions = getQuestionPreviewServerWorkspaceOptions(options);
-  let runtime: QuestionPreviewRuntimeLifecycle | null = null;
+  let engine: QuestionPreviewEngineLifecycle | null = null;
   let server: Server | null = null;
-  let workspaceManager: PreviewWorkspaceManager | null = null;
-  let workspaceHomeRootToRemove: string | null = null;
-  const upgradedSockets = new Set<Duplex>();
+  const workspaceManagers: PreviewWorkspaceManager[] = [];
 
-  async function closeWorkspaceManager() {
-    await workspaceManager?.close();
-    if (workspaceHomeRootToRemove != null) {
-      await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true });
-    }
-  }
+  const catalog = new LocalPreviewSessionCatalog(async (previewSessionId, courseDir) => {
+    const courseSource = await createLocalPreviewCourseSource(courseDir);
+    const sessionPrefix = `/preview-sessions/${previewSessionId}`;
+    let workspaceManager: PreviewWorkspaceManager | null = null;
+    let workspaceHomeRootToRemove: string | null = null;
 
-  try {
     if (workspaceOptions.workspacesEnabled) {
-      startupLogger?.('Initializing workspace manager.');
       const homeRoot =
         workspaceOptions.workspaceHomeDir ??
         (workspaceHomeRootToRemove = await fs.mkdtemp(
-          path.join(os.tmpdir(), 'pl-preview-workspaces-'),
+          path.join(os.tmpdir(), `pl-preview-workspaces-${previewSessionId}-`),
         ));
       workspaceManager = createWorkspaceManager({
         containerNetwork: workspaceOptions.workspaceNetwork,
@@ -628,103 +675,297 @@ export async function startQuestionPreviewServer({
         maxRunningContainers: workspaceOptions.workspaceMaxContainers,
         pullPolicy: workspaceOptions.workspacePullPolicy,
         startTimeoutMs: workspaceOptions.workspaceStartTimeoutMs,
+        urlPrefix: sessionPrefix,
       });
-
+      workspaceManagers.push(workspaceManager);
       try {
-        const prunedContainerIds = await workspaceManager.pruneOrphans();
-        if (prunedContainerIds.length > 0) {
-          startupLogger?.(`Removed ${prunedContainerIds.length} orphaned workspace container(s).`);
-        }
+        await workspaceManager.pruneOrphans();
       } catch (err) {
-        // Docker being unreachable at startup is fine: workspace launches
-        // will report it per workspace, and question previews still work.
         startupLogger?.(
           `Skipping workspace orphan pruning: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
 
-    startupLogger?.('Initializing preview runtime.');
-    runtime = await createQuestionPreviewRuntimeLifecycle({
-      createRuntime,
-      localPreviewGeneratedFilesMax,
-      localPreviewWorkspaces: workspaceManager,
-      runtimeOptions: {
-        ...runtimeOptions,
-        courseSource,
-        ...(startupLogger == null ? {} : { startupLogger }),
-      },
-    });
+    let runtime: QuestionPreviewRuntimeLifecycle;
+    try {
+      runtime =
+        createRuntime == null
+          ? createQuestionPreviewCourseRuntimeLifecycle({
+              courseSource,
+              engine: engine!,
+              localPreviewGeneratedFilesMax,
+              localPreviewWorkspaces: workspaceManager,
+              renderMode: options.renderMode,
+              urlPrefix: `${sessionPrefix}/preview-render`,
+            })
+          : await createQuestionPreviewRuntimeLifecycle({
+              createRuntime,
+              localPreviewGeneratedFilesMax,
+              localPreviewWorkspaces: workspaceManager,
+              runtimeOptions: {
+                ...runtimeOptions,
+                courseDir: courseSource.courseDir,
+                courseSource,
+                ...(startupLogger == null ? {} : { startupLogger }),
+              },
+              urlPrefix: `${sessionPrefix}/preview-render`,
+            });
+    } catch (err) {
+      await workspaceManager?.close().catch(() => {});
+      if (workspaceHomeRootToRemove != null) {
+        await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch(() => {});
+      }
+      throw err;
+    }
 
-    startupLogger?.('Preparing preview asset routes.');
-
-    startupLogger?.(`Starting HTTP server on ${httpOptions.host}:${httpOptions.port}.`);
-    const { app, workspaceUpgradeHandler } = createQuestionPreviewApp({
+    const { app } = createQuestionPreviewApp({
       courseSource,
       httpOptions,
       localPreviewGeneratedFiles: runtime.localPreviewGeneratedFiles,
       localPreviewSubmissionFiles: runtime.localPreviewSubmissionFiles,
       runtime,
+      sessionPrefix,
       urlPrefix: runtime.urlPrefix,
       workspaceManager,
     });
-    server = app.listen(httpOptions.port, httpOptions.host);
-    if (workspaceUpgradeHandler != null) {
-      const upgradeHandler = workspaceUpgradeHandler;
-      server.on('upgrade', (req, socket, head) => {
-        // Upgraded sockets detach from the HTTP server's connection tracking,
-        // so track them here to close them reliably on shutdown.
-        upgradedSockets.add(socket);
-        socket.on('close', () => upgradedSockets.delete(socket));
-        upgradeHandler(req, socket, head);
-      });
-    }
-    await waitForListening(server);
-  } catch (err) {
-    await runtime?.close().catch(() => {});
-    await closeWorkspaceManager().catch(() => {});
 
-    const failedServer = server;
+    return {
+      async close() {
+        let closeError: unknown;
+        try {
+          await workspaceManager?.close();
+        } catch (err) {
+          closeError = err;
+        }
+        if (workspaceHomeRootToRemove != null) {
+          await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch((err) => {
+            closeError ??= err;
+          });
+        }
+        await runtime.close().catch((err) => {
+          closeError ??= err;
+        });
+        if (closeError != null) throw closeError as Error;
+      },
+      courseDir: courseSource.courseDir,
+      handle: app,
+    };
+  }, options.questionTimeoutMilliseconds);
 
-    if (failedServer != null) {
-      await new Promise<void>((resolve) => failedServer.close(() => resolve()));
-    }
-
-    throw err;
+  if (createRuntime == null) {
+    startupLogger?.('Initializing shared PrairieLearn preview engine.');
+    engine = await createEngine({
+      ...runtimeOptions,
+      prewarmWorkers: true,
+      ...(startupLogger == null ? {} : { startupLogger }),
+    });
   }
 
-  return {
-    async close() {
-      let closeError: unknown;
-
-      try {
-        for (const socket of upgradedSockets) socket.destroy();
-        await new Promise<void>((resolve, reject) => {
-          server.close((err) => (err ? reject(err) : resolve()));
-        });
-      } catch (err) {
-        closeError = err;
-      }
-
-      try {
-        await closeWorkspaceManager();
-      } catch (err) {
-        closeError ??= err;
-      }
-
-      try {
-        await runtime.close();
-      } catch (err) {
-        closeError ??= err;
-      }
-
-      if (closeError != null) {
-        throw closeError as Error;
-      }
-    },
-    options,
-    runtime,
-    server,
-    workspaceManager,
+  const controlPlaneError = (
+    res: Response,
+    status: number,
+    code: string,
+    message: string,
+    details?: Record<string, unknown>,
+  ) => {
+    res.status(status).json({ error: { code, message, ...(details == null ? {} : { details }) } });
   };
+
+  const authToken = process.env.PRAIRIELEARN_PREVIEW_AUTH_TOKEN;
+  const requireControlPlaneAuth = (req: Request, res: Response, next: () => void) => {
+    if (authToken == null || authToken === '') {
+      next();
+      return;
+    }
+    const authorization = req.get('authorization');
+    const supplied = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const expectedDigest = createHash('sha256').update(authToken).digest();
+    const suppliedDigest = createHash('sha256').update(supplied).digest();
+    if (!timingSafeEqual(expectedDigest, suppliedDigest)) {
+      controlPlaneError(res, 401, 'unauthorized', 'A valid bearer token is required.');
+      return;
+    }
+    next();
+  };
+
+  const hasCanonicalSessionId = (req: Request, previewSessionId: string) =>
+    /^pvs_[A-Za-z0-9_-]{22}$/.test(previewSessionId) &&
+    rawOriginalRequestPathname(req).split('/')[2] === previewSessionId;
+
+  const app = express();
+  app.disable('x-powered-by');
+  app.enable('strict routing');
+  assets.applyMiddleware(app);
+  app.use(
+    '/localscripts/calculationQuestion',
+    express.static(path.join(APP_ROOT_PATH, 'public/localscripts/calculationQuestion')),
+  );
+  app.use((_req, res, next) => {
+    res.set('cache-control', 'no-store');
+    next();
+  });
+  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+  app.get('/metadata', requireControlPlaneAuth, (_req, res) => {
+    res.json({
+      apiVersion: 'experimental-1',
+      prairieLearnVersion: PRAIRIELEARN_VERSION,
+      previewSessionsEndpoint: '/preview-sessions',
+      features: {
+        renderModes: options.renderMode === 'full' ? ['question-only', 'full'] : ['question-only'],
+        defaultRenderMode: options.renderMode,
+        grading: options.renderMode === 'full',
+        workspaces: options.workspacesEnabled,
+        workspaceControls: options.workspacesEnabled ? ['reboot', 'reset'] : [],
+      },
+      limits: {
+        questionTimeoutMs: options.questionTimeoutMilliseconds,
+        workersCount: options.workersCount,
+        ...(options.workspacesEnabled
+          ? {
+              workspaceIdleTimeoutMs: options.workspaceIdleTimeoutMs,
+              workspaceMaxContainers: options.workspaceMaxContainers,
+              workspaceStartTimeoutMs: options.workspaceStartTimeoutMs,
+            }
+          : {}),
+      },
+    });
+  });
+  app.get('/preview-sessions', requireControlPlaneAuth, (_req, res) => {
+    res.json({ previewSessions: catalog.list() });
+  });
+  app.post(
+    '/preview-sessions',
+    requireControlPlaneAuth,
+    express.json({ limit: '16kb', strict: true }),
+    asyncHandler(async (req, res) => {
+      const courseDir = req.body?.courseDir;
+      if (typeof courseDir !== 'string' || !path.isAbsolute(courseDir)) {
+        controlPlaneError(
+          res,
+          400,
+          'invalid_request',
+          'courseDir must be an absolute path.',
+          typeof courseDir === 'string' ? { courseDir } : undefined,
+        );
+        return;
+      }
+      try {
+        const descriptor = await catalog.create(courseDir);
+        res.status(201).json(descriptor);
+      } catch (err) {
+        if (err instanceof InvalidLocalPreviewCourseError) {
+          controlPlaneError(
+            res,
+            422,
+            'invalid_course_dir',
+            'The course directory does not exist or is not a PrairieLearn course.',
+            { courseDir },
+          );
+        } else {
+          controlPlaneError(
+            res,
+            503,
+            'capability_unavailable',
+            'The Local Preview Session could not be created.',
+          );
+        }
+      }
+    }),
+  );
+  app.delete(
+    '/preview-sessions/:previewSessionId',
+    requireControlPlaneAuth,
+    asyncHandler(async (req, res) => {
+      if (
+        !hasCanonicalSessionId(req, req.params.previewSessionId) ||
+        !(await catalog.delete(req.params.previewSessionId))
+      ) {
+        controlPlaneError(
+          res,
+          404,
+          'preview_session_not_found',
+          'The Local Preview Session does not exist.',
+        );
+        return;
+      }
+      res.status(204).end();
+    }),
+  );
+  app.use('/preview-sessions/:previewSessionId', (req, res, next) => {
+    const previewSessionId = req.params.previewSessionId;
+    if (!hasCanonicalSessionId(req, previewSessionId)) {
+      res.status(404).end();
+      return;
+    }
+    const lease = catalog.acquire(previewSessionId);
+    if (lease == null) {
+      res.status(404).end();
+      return;
+    }
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      lease.release();
+    };
+    res.once('finish', release);
+    res.once('close', release);
+    lease.handle(req, res, next);
+  });
+  app.use((_req, res) => res.status(404).end());
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    if (_req.path === '/preview-sessions' || _req.path === '/metadata') {
+      controlPlaneError(res, 400, 'invalid_request', 'The request body is invalid.');
+    } else if (rawOriginalRequestPathname(_req).startsWith('/preview-sessions/')) {
+      void sendQuestionPreviewHttpAction(res, mapQuestionPreviewInvalidQidResponse()).catch(next);
+    } else {
+      res.status(404).end();
+    }
+  });
+
+  try {
+    const startupSessions: LocalPreviewSessionDescriptor[] = [];
+    for (const courseDir of options.courseDirs) {
+      const session = await catalog.create(courseDir);
+      startupSessions.push(session);
+      startupLogger?.(
+        `Created startup Local Preview Session ${session.previewSessionId}: ${session.courseDir}.`,
+      );
+    }
+
+    startupLogger?.(`Starting HTTP server on ${httpOptions.host}:${httpOptions.port}.`);
+    server = app.listen(httpOptions.port, httpOptions.host);
+    await waitForListening(server);
+    return {
+      async close() {
+        let closeError: unknown;
+        await new Promise<void>((resolve, reject) => {
+          server!.close((err) => (err ? reject(err) : resolve()));
+        }).catch((err) => {
+          closeError = err;
+        });
+        await catalog.close().catch((err) => {
+          closeError ??= err;
+        });
+        await engine?.close().catch((err) => {
+          closeError ??= err;
+        });
+        if (closeError != null) throw closeError as Error;
+      },
+      options,
+      server,
+      startupSessions,
+      workspaceManager: workspaceManagers[0] ?? null,
+    };
+  } catch (err) {
+    await catalog.close().catch(() => {});
+    await engine?.close().catch(() => {});
+    if (server != null) await new Promise<void>((resolve) => server!.close(() => resolve()));
+    throw err;
+  }
 }
