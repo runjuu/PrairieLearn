@@ -138,7 +138,7 @@ async function writeCourseFile(courseDir: string, filename: string, contents: st
 async function writeQuestionInfo(
   courseDir: string,
   qid: string,
-  info: { title: string; topic: string; type: string; uuid: string },
+  info: { title: string; topic: string; type: string; uuid: string } & Record<string, unknown>,
 ) {
   await writeQuestionFile(courseDir, qid, 'info.json', JSON.stringify(info));
 }
@@ -505,6 +505,75 @@ describe('question preview server startup', () => {
 });
 
 describe('question preview server asset routes', () => {
+  it('serves declared legacy question files and PrairieLearn-owned legacy modules only', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'legacy/assets', {
+      clientFiles: ['client.js', 'diagram.svg'],
+      options: {
+        correctAnswers: ['Four'],
+        incorrectAnswers: ['Three'],
+        text: 'What is two plus two?',
+      },
+      title: 'Legacy assets',
+      topic: 'Testing',
+      type: 'MultipleChoice',
+      uuid: '11111111-1111-4111-8111-111111111130',
+    });
+    await writeQuestionFile(
+      courseDir,
+      'legacy/assets',
+      'client.js',
+      "define(['MCQClient'], function (MCQClient) { return new MCQClient.MCQClient(); });",
+    );
+    await writeQuestionFile(courseDir, 'legacy/assets', 'diagram.svg', '<svg></svg>');
+    await writeQuestionFile(courseDir, 'legacy/assets', 'server.js', 'server secret');
+
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => testFailureDocument(),
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const cases = [
+        {
+          body: /MCQClient/,
+          path: '/preview-render/questions/legacy/assets/legacy-files/client.js',
+          status: 200,
+        },
+        {
+          body: /<svg>/,
+          path: '/preview-render/questions/legacy/assets/legacy-files/diagram.svg',
+          status: 200,
+        },
+        {
+          body: /define/,
+          path: '/localscripts/calculationQuestion/MCQClient.js',
+          status: 200,
+        },
+        {
+          body: /server secret/,
+          path: '/preview-render/questions/legacy/assets/legacy-files/server.js',
+          status: 404,
+        },
+      ];
+
+      for (const testCase of cases) {
+        const response = await fetch(`${baseUrl}${testCase.path}`);
+        const body = await response.text();
+        assert.equal(response.status, testCase.status, testCase.path);
+        if (testCase.status === 200) assert.match(body, testCase.body, testCase.path);
+        else nodeAssert.doesNotMatch(body, testCase.body, testCase.path);
+      }
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('serves ordinary PrairieLearn, course, element, extension, and question-local assets', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestionInfo(courseDir, 'unit/assets', {
@@ -1820,7 +1889,6 @@ describe('question preview server direct preview route', () => {
     );
     await writeServer('server edit one');
 
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const started = await startTestQuestionPreviewServer({
       argv: [
         '--course-dir',
@@ -1863,13 +1931,9 @@ describe('question preview server direct preview route', () => {
       const metadataRefresh = await fetch(previewUrl);
       const metadataRefreshBody = await metadataRefresh.text();
 
-      assert.equal(metadataRefresh.status, 422);
-      assert.match(metadataRefreshBody, /Question preview failed/);
-      nodeAssert.doesNotMatch(
-        metadataRefreshBody,
-        /Unsupported preview question type: MultipleChoice/,
-      );
-      assert.isAtLeast(consoleError.mock.calls.length, 1);
+      assert.equal(metadataRefresh.status, 200);
+      assert.match(metadataRefreshBody, /data-question-type="MultipleChoice"/);
+      assert.match(metadataRefreshBody, /class="question-data"/);
 
       await writeInfo('v3');
       await writeServer('server edit two');
@@ -1882,7 +1946,6 @@ describe('question preview server direct preview route', () => {
       assert.match(serverRefreshBody, /server edit two/);
       nodeAssert.doesNotMatch(serverRefreshBody, /server edit one/);
     } finally {
-      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }

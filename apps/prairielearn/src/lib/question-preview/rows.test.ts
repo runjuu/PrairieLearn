@@ -33,6 +33,9 @@ describe('local preview rows', () => {
       readTemplateInfo: async () => {
         throw new Error('not used by this row test');
       },
+      resolveLegacyQuestionFile: async () => {
+        throw new Error('not used by this row test');
+      },
       resolveResource: async () => null,
       sanitizeDiagnosticValue: (value) => value,
     };

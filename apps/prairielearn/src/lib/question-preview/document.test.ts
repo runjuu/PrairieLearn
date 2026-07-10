@@ -194,6 +194,9 @@ describe('question preview document', () => {
       readTemplateInfo: async () => {
         throw new Error('not used');
       },
+      resolveLegacyQuestionFile: async () => {
+        throw new Error('not used');
+      },
       resolveResource: async () => null,
       sanitizeDiagnosticValue: (value) => value,
     };
@@ -223,6 +226,9 @@ describe('question preview document', () => {
         throw new Error('Failed to read /course/questions/demo/info.json');
       },
       readTemplateInfo: async () => {
+        throw new Error('not used');
+      },
+      resolveLegacyQuestionFile: async () => {
         throw new Error('not used');
       },
       resolveResource: async () => null,
@@ -333,14 +339,26 @@ describe('question preview document', () => {
     }
   });
 
-  it('returns diagnostics for unsupported non-Freeform question types', async () => {
+  it('renders a native MultipleChoice question through the legacy browser pipeline', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestionInfo(courseDir, 'legacy/multiple-choice', {
       title: 'Legacy question',
+      options: {
+        correctAnswers: ['Four'],
+        incorrectAnswers: ['Three', 'Five'],
+        numberAnswers: 3,
+        text: 'What is two plus two?',
+      },
       topic: 'Testing',
       type: 'MultipleChoice',
       uuid: '11111111-1111-4111-8111-111111111113',
     });
+    await writeQuestionFile(
+      courseDir,
+      'legacy/multiple-choice',
+      'client.js',
+      "define(['MCQClient'], function (MCQClient) { return new MCQClient.MCQClient(); });",
+    );
 
     try {
       await withInitializedDocumentRenderer(courseDir, async (renderer) => {
@@ -349,16 +367,189 @@ describe('question preview document', () => {
           variantSeed: '1',
         });
 
+        assert.equal(result.ok, true);
+        assert.deepEqual(result.diagnostics, []);
+        assert.match(result.documentHtml, /class="question-data"/);
+        assert.match(result.documentHtml, /localscripts\/questionCalculation/);
+        assert.match(result.documentHtml, /name="postData" class="postData"/);
+        assert.match(result.documentHtml, /data-question-type="MultipleChoice"/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('renders all five legacy Source Question Types through the Calculation adapter', async () => {
+    const courseDir = await makeTempCourse();
+    const questions = [
+      {
+        options: {},
+        qid: 'legacy/calculation',
+        type: 'Calculation',
+      },
+      {
+        options: {
+          correctAnswers: ['True'],
+          incorrectAnswers: ['False'],
+          numberAnswers: 2,
+          text: 'Select true.',
+        },
+        qid: 'legacy/checkbox',
+        type: 'Checkbox',
+      },
+      {
+        options: { fileName: 'starter.txt' },
+        qid: 'legacy/file',
+        type: 'File',
+      },
+      {
+        options: {
+          correctAnswers: ['Four'],
+          incorrectAnswers: ['Three'],
+          text: 'What is two plus two?',
+        },
+        qid: 'legacy/multiple-choice-all-types',
+        type: 'MultipleChoice',
+      },
+      {
+        options: {
+          falseStatements: ['Two plus two is five.'],
+          trueStatements: ['Two plus two is four.'],
+        },
+        qid: 'legacy/multiple-true-false',
+        type: 'MultipleTrueFalse',
+      },
+    ] as const;
+
+    for (const [index, question] of questions.entries()) {
+      await writeQuestionInfo(courseDir, question.qid, {
+        options: question.options,
+        title: `${question.type} preview`,
+        topic: 'Testing',
+        type: question.type,
+        uuid: `11111111-1111-4111-8111-${String(200 + index).padStart(12, '0')}`,
+      });
+    }
+    await writeQuestionFile(
+      courseDir,
+      'legacy/calculation',
+      'server.js',
+      'define([], function () { return { getData: function () { return { params: {}, trueAnswer: {} }; }, gradeAnswer: function () { return { score: 1 }; } }; });',
+    );
+    await writeQuestionFile(
+      courseDir,
+      'legacy/calculation',
+      'client.js',
+      "define(['SimpleClient'], function (SimpleClient) { return new SimpleClient.SimpleClient(); });",
+    );
+    await writeQuestionFile(courseDir, 'legacy/file', 'starter.txt', 'starter contents');
+    await writeQuestionFile(courseDir, 'legacy/file', 'question.html', '<p>Upload a file.</p>');
+    await writeQuestionFile(courseDir, 'legacy/file', 'answer.html', '<p>Any file.</p>');
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        for (const question of questions) {
+          for (const renderMode of ['full', 'question-only'] as const) {
+            const result = await renderer.render({
+              qid: parsePreviewQid(question.qid),
+              renderMode,
+            });
+
+            assert.equal(result.ok, true, `${question.type} ${renderMode}`);
+            assert.match(result.documentHtml, new RegExp(`data-question-type="${question.type}"`));
+            assert.match(result.documentHtml, /class="question-data"/);
+          }
+        }
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('grades only the submittedAnswer from a legacy postData envelope', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'legacy/gradable', {
+      title: 'Legacy grading',
+      topic: 'Testing',
+      type: 'Calculation',
+      uuid: '11111111-1111-4111-8111-111111111213',
+    });
+    await writeQuestionFile(
+      courseDir,
+      'legacy/gradable',
+      'server.js',
+      [
+        'define([], function () {',
+        '  return {',
+        '    getData: function () { return { params: { prompt: "authoritative" }, trueAnswer: { value: "yes" } }; },',
+        '    gradeAnswer: function (vid, params, trueAnswer, submittedAnswer) {',
+        '      return { score: params.prompt === "authoritative" && trueAnswer.value === submittedAnswer.value ? 1 : 0 };',
+        '    }',
+        '  };',
+        '});',
+      ].join('\n'),
+    );
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('legacy/gradable'),
+          submission: {
+            rawSubmittedAnswer: {
+              postData: JSON.stringify({
+                params: { prompt: 'tampered' },
+                submittedAnswer: { value: 'yes' },
+                trueAnswer: { value: 'no' },
+                variant: { id: 'attacker-controlled' },
+              }),
+            },
+          },
+          variantSeed: '7',
+        });
+
+        assert.equal(result.ok, true);
+        assert.match(result.documentHtml, /data-testid="submission-block"/);
+        assert.match(result.documentHtml, /100%/);
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns a controlled browser error for malformed legacy postData', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionInfo(courseDir, 'legacy/malformed-submission', {
+      options: {
+        correctAnswers: ['Four'],
+        incorrectAnswers: ['Three'],
+        text: 'What is two plus two?',
+      },
+      title: 'Malformed legacy submission',
+      topic: 'Testing',
+      type: 'MultipleChoice',
+      uuid: '11111111-1111-4111-8111-111111111214',
+    });
+
+    try {
+      await withInitializedDocumentRenderer(courseDir, async (renderer) => {
+        const result = await renderer.render({
+          qid: parsePreviewQid('legacy/malformed-submission'),
+          submission: { rawSubmittedAnswer: { postData: '{' } },
+        });
+
         assert.equal(result.ok, false);
-        assert.equal('payload' in result, false);
         assertGenericFailureDocument(result.documentHtml);
-        assert.notMatch(result.documentHtml, /Unsupported preview question type/);
-        assert.equal(result.diagnostics[0].fatal, true);
-        assert.equal(result.diagnostics[0].phase, 'metadata');
-        assert.match(
-          result.diagnostics[0].message,
-          /Unsupported preview question type: MultipleChoice/,
-        );
+        assert.equal(result.diagnostics[0].phase, 'parse');
+        assert.match(result.diagnostics[0].message, /invalid JSON/);
+        assert.equal('stack' in result.diagnostics[0], false);
+
+        const oversized = await renderer.render({
+          qid: parsePreviewQid('legacy/malformed-submission'),
+          submission: { rawSubmittedAnswer: { postData: 'x'.repeat(1024 * 1024 + 1) } },
+        });
+        assert.equal(oversized.ok, false);
+        assert.equal(oversized.diagnostics[0].phase, 'parse');
+        assert.match(oversized.diagnostics[0].message, /too large/);
       });
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -431,6 +622,9 @@ describe('question preview document', () => {
       },
       readTemplateInfo: async () => {
         throw new Error('template lookup should not occur for an invalid seed');
+      },
+      resolveLegacyQuestionFile: async () => {
+        throw new Error('legacy file lookup should not occur for an invalid seed');
       },
       resolveResource: async () => null,
       sanitizeDiagnosticValue: (value) => value,
