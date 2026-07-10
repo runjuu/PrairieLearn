@@ -891,10 +891,30 @@ export async function startQuestionPreviewServer({
     '/preview-sessions/:previewSessionId',
     requireControlPlaneAuth,
     asyncHandler(async (req, res) => {
-      if (
-        !hasCanonicalSessionId(req, req.params.previewSessionId) ||
-        !(await catalog.delete(req.params.previewSessionId))
-      ) {
+      if (!hasCanonicalSessionId(req, req.params.previewSessionId)) {
+        controlPlaneError(
+          res,
+          404,
+          'preview_session_not_found',
+          'The Local Preview Session does not exist.',
+        );
+        return;
+      }
+
+      let deleted: boolean;
+      try {
+        deleted = await catalog.delete(req.params.previewSessionId);
+      } catch (err) {
+        console.error('Failed to clean up Local Preview Session.', err);
+        controlPlaneError(
+          res,
+          503,
+          'capability_unavailable',
+          'The Local Preview Session could not be fully cleaned up.',
+        );
+        return;
+      }
+      if (!deleted) {
         controlPlaneError(
           res,
           404,

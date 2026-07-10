@@ -359,6 +359,97 @@ describe('Local Preview Session contract', () => {
     }
   });
 
+  it('returns control-plane JSON when runtime cleanup fails', async () => {
+    const courseDir = await makeTempCourse();
+    const runtimeCleanupDiagnostic = `Runtime cleanup failed for ${courseDir} in Docker.`;
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {
+          throw new Error(runtimeCleanupDiagnostic);
+        },
+        render: async () => testFailureDocument(),
+      }),
+    });
+
+    try {
+      const session = started.startupSessions[0];
+      assert.isDefined(session);
+      const baseUrl = serverUrl(started);
+      const sessionUrl = `${baseUrl}/preview-sessions/${session.previewSessionId}`;
+
+      const deleted = await fetch(sessionUrl, { method: 'DELETE' });
+      const responseBody = await deleted.text();
+      assert.equal(deleted.status, 503);
+      assert.match(deleted.headers.get('content-type') ?? '', /application\/json/);
+      assert.deepEqual(JSON.parse(responseBody), {
+        error: {
+          code: 'capability_unavailable',
+          message: 'The Local Preview Session could not be fully cleaned up.',
+        },
+      });
+      assert.notInclude(responseBody, runtimeCleanupDiagnostic);
+      assert.deepEqual(await (await fetch(`${baseUrl}/preview-sessions`)).json(), {
+        previewSessions: [],
+      });
+      assert.equal((await fetch(`${sessionUrl}/questions/demo/example`)).status, 404);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('returns control-plane JSON when Preview Workspace cleanup fails', async () => {
+    const courseDir = await makeTempCourse();
+    const workspaceHomePath = path.join(courseDir, 'workspace-home-file');
+    await fs.writeFile(workspaceHomePath, 'not a directory');
+    let runtimeClosed = false;
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--course-dir',
+        courseDir,
+        '--port',
+        '0',
+        '--workspaces',
+        '--workspace-home-dir',
+        workspaceHomePath,
+      ],
+      createRuntime: async () => ({
+        close: async () => {
+          runtimeClosed = true;
+        },
+        render: async () => testFailureDocument(),
+      }),
+    });
+
+    try {
+      const session = started.startupSessions[0];
+      assert.isDefined(session);
+      const baseUrl = serverUrl(started);
+      const sessionUrl = `${baseUrl}/preview-sessions/${session.previewSessionId}`;
+
+      const deleted = await fetch(sessionUrl, { method: 'DELETE' });
+      const responseBody = await deleted.text();
+      assert.equal(deleted.status, 503);
+      assert.match(deleted.headers.get('content-type') ?? '', /application\/json/);
+      assert.deepEqual(JSON.parse(responseBody), {
+        error: {
+          code: 'capability_unavailable',
+          message: 'The Local Preview Session could not be fully cleaned up.',
+        },
+      });
+      assert.notInclude(responseBody, workspaceHomePath);
+      assert.equal(runtimeClosed, true);
+      assert.deepEqual(await (await fetch(`${baseUrl}/preview-sessions`)).json(), {
+        previewSessions: [],
+      });
+      assert.equal((await fetch(`${sessionUrl}/questions/demo/example`)).status, 404);
+    } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('protects only the control plane and advertises exact default capabilities', async () => {
     const courseDir = await makeTempCourse();
     vi.stubEnv('PRAIRIELEARN_PREVIEW_AUTH_TOKEN', 'server-secret');
