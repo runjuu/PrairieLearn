@@ -9,6 +9,7 @@ import {
   QuestionJsonSchema,
 } from '../../schemas/index.js';
 
+import { ExpectedQuestionPreviewError } from './expected-error.js';
 import type { QuestionPreviewQid } from './qid.js';
 
 export interface LocalPreviewCourseMetadata {
@@ -18,28 +19,23 @@ export interface LocalPreviewCourseMetadata {
   title: string;
 }
 
+export type LocalPreviewCourseResource =
+  | { filePathSegments: string[]; kind: 'course-client-file' }
+  | { filePathSegments: string[]; kind: 'element-extension-file' }
+  | { filePathSegments: string[]; kind: 'element-file' }
+  | { filePathSegments: string[]; kind: 'question-client-file'; qid: QuestionPreviewQid };
+
 export interface LocalPreviewCourseSource {
   courseDir: string;
   courseMetadata: LocalPreviewCourseMetadata;
   readQuestionInfo(qid: QuestionPreviewQid): Promise<QuestionJson>;
   readTemplateInfo(qid: QuestionPreviewQid): Promise<QuestionJson>;
-  resolveFile(rootPathSegments: string[], filePathSegments: string[]): Promise<string | null>;
+  resolveResource(resource: LocalPreviewCourseResource): Promise<string | null>;
+  sanitizeDiagnosticValue(value: unknown): unknown;
 }
 
 export class InvalidLocalPreviewCourseError extends Error {
   override name = 'InvalidLocalPreviewCourseError';
-}
-
-class ExpectedLocalPreviewCourseSourceError extends Error {
-  data: unknown;
-  expectedQuestionPreviewFailure = true;
-  fatal = true;
-  phase = 'metadata' as const;
-
-  constructor(message: string, data: unknown) {
-    super(message);
-    this.data = data;
-  }
 }
 
 function isPathInsideRoot(root: string, candidate: string) {
@@ -60,6 +56,32 @@ function hasUnsafePathSegment(pathSegments: string[]) {
       segment.includes('\0') ||
       path.isAbsolute(segment),
   );
+}
+
+function resourceRootPathSegments(resource: LocalPreviewCourseResource): string[] {
+  switch (resource.kind) {
+    case 'course-client-file':
+      return ['clientFilesCourse'];
+    case 'element-file':
+      return ['elements'];
+    case 'element-extension-file':
+      return ['elementExtensions'];
+    case 'question-client-file':
+      return ['questions', ...resource.qid.pathSegments, 'clientFilesQuestion'];
+  }
+}
+
+function sanitizeDiagnosticValue(value: unknown, courseDir: string): unknown {
+  if (typeof value === 'string') return value.split(courseDir).join('<course>');
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeDiagnosticValue(item, courseDir));
+  }
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, sanitizeDiagnosticValue(item, courseDir)]),
+    );
+  }
+  return value;
 }
 
 export async function createLocalPreviewCourseSource(
@@ -151,23 +173,23 @@ export async function createLocalPreviewCourseSource(
         infoPath = await fs.realpath(path.join(questionDir, 'info.json'));
       } catch (err) {
         if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
-          throw new ExpectedLocalPreviewCourseSourceError(
+          throw new ExpectedQuestionPreviewError(
             `Question "${qid.decoded}" is missing info.json.`,
-            { qid: qid.decoded },
+            { data: { qid: qid.decoded }, phase: 'metadata' },
           );
         }
         throw err;
       }
       if (!isPathInsideRoot(questionsDir, questionDir)) {
-        throw new ExpectedLocalPreviewCourseSourceError(
+        throw new ExpectedQuestionPreviewError(
           `Question "${qid.decoded}" escapes the canonical course root.`,
-          { qid: qid.decoded },
+          { data: { qid: qid.decoded }, phase: 'metadata' },
         );
       }
       if (!isPathInsideRoot(questionDir, infoPath)) {
-        throw new ExpectedLocalPreviewCourseSourceError(
+        throw new ExpectedQuestionPreviewError(
           `Question "${qid.decoded}" escapes the canonical course root.`,
-          { qid: qid.decoded },
+          { data: { qid: qid.decoded }, phase: 'metadata' },
         );
       }
 
@@ -176,9 +198,9 @@ export async function createLocalPreviewCourseSource(
         rawInfo = JSON.parse(await fs.readFile(infoPath, 'utf8'));
       } catch (err) {
         if (err instanceof SyntaxError) {
-          throw new ExpectedLocalPreviewCourseSourceError(
+          throw new ExpectedQuestionPreviewError(
             `Question "${qid.decoded}" has invalid info.json JSON.`,
-            { qid: qid.decoded },
+            { data: { qid: qid.decoded }, phase: 'metadata' },
           );
         }
         throw err;
@@ -186,9 +208,12 @@ export async function createLocalPreviewCourseSource(
 
       const parsedInfo = QuestionJsonSchema.safeParse(rawInfo);
       if (!parsedInfo.success) {
-        throw new ExpectedLocalPreviewCourseSourceError(
+        throw new ExpectedQuestionPreviewError(
           `Question "${qid.decoded}" has invalid info.json metadata.`,
-          { issues: parsedInfo.error.issues, qid: qid.decoded },
+          {
+            data: { issues: parsedInfo.error.issues, qid: qid.decoded },
+            phase: 'metadata',
+          },
         );
       }
       return parsedInfo.data;
@@ -196,7 +221,9 @@ export async function createLocalPreviewCourseSource(
     async readTemplateInfo(qid) {
       return source.readQuestionInfo(qid);
     },
-    async resolveFile(rootPathSegments, filePathSegments) {
+    async resolveResource(resource) {
+      const rootPathSegments = resourceRootPathSegments(resource);
+      const { filePathSegments } = resource;
       if (
         hasUnsafePathSegment(rootPathSegments) ||
         hasUnsafePathSegment(filePathSegments) ||
@@ -215,6 +242,9 @@ export async function createLocalPreviewCourseSource(
         if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return null;
         throw err;
       }
+    },
+    sanitizeDiagnosticValue(value) {
+      return sanitizeDiagnosticValue(value, courseDir);
     },
   };
   return source;

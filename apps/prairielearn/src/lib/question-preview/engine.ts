@@ -68,8 +68,7 @@ class InitializedQuestionPreviewEngineLifecycle implements QuestionPreviewEngine
     input: QuestionPreviewDocumentInput,
   ) {
     if (this.closed) throw new Error('Question preview engine is closed.');
-    const state = await this.getGeneration();
-    state.activeRenders++;
+    const state = await this.acquireGeneration();
 
     try {
       return await state.generation.render(options, input);
@@ -90,8 +89,11 @@ class InitializedQuestionPreviewEngineLifecycle implements QuestionPreviewEngine
     return this.closePromise;
   }
 
-  private async getGeneration() {
-    if (this.currentGeneration != null) return this.currentGeneration;
+  private async acquireGeneration() {
+    if (this.currentGeneration != null) {
+      this.currentGeneration.activeRenders++;
+      return this.currentGeneration;
+    }
 
     this.replacementPromise ??= this.lastStaleClose
       .catch(() => {})
@@ -105,6 +107,7 @@ class InitializedQuestionPreviewEngineLifecycle implements QuestionPreviewEngine
         throw new Error('Question preview engine is closed.');
       }
       this.currentGeneration = state;
+      state.activeRenders++;
       return state;
     } finally {
       if (this.replacementPromise === replacementPromise) this.replacementPromise = null;

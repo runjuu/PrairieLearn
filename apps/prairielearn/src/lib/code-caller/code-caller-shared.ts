@@ -5,6 +5,10 @@ export class FunctionMissingError extends Error {
   }
 }
 
+export class CodeCallerPoolUnavailableError extends Error {
+  override name = 'CodeCallerPoolUnavailableError';
+}
+
 export interface CodeCallerResult {
   result: any;
   output: string;

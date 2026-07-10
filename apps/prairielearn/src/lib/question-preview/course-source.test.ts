@@ -204,13 +204,45 @@ describe('Local Preview Course Source', () => {
     try {
       const source = await createLocalPreviewCourseSource(courseDir);
       assert.equal(
-        await source.resolveFile(['clientFilesCourse'], ['course.txt']),
+        await source.resolveResource({
+          filePathSegments: ['course.txt'],
+          kind: 'course-client-file',
+        }),
         await fs.realpath(courseAsset),
       );
-      assert.isNull(await source.resolveFile(['clientFilesCourse'], ['secret.txt']));
+      assert.isNull(
+        await source.resolveResource({
+          filePathSegments: ['secret.txt'],
+          kind: 'course-client-file',
+        }),
+      );
     } finally {
       await fs.rm(courseDir, { force: true, recursive: true });
       await fs.rm(outsideDir, { force: true, recursive: true });
+    }
+  });
+
+  it('sanitizes its canonical path from nested diagnostic values', async () => {
+    const courseDir = await makeCourseRoot({
+      name: 'TST 101',
+      title: 'Preview source testing',
+      topics: [{ color: 'blue1', name: 'Testing' }],
+    });
+
+    try {
+      const source = await createLocalPreviewCourseSource(courseDir);
+      assert.deepEqual(
+        source.sanitizeDiagnosticValue({
+          message: `Failed below ${source.courseDir}/questions`,
+          paths: [source.courseDir],
+        }),
+        {
+          message: 'Failed below <course>/questions',
+          paths: ['<course>'],
+        },
+      );
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
     }
   });
 });
