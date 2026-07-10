@@ -2,7 +2,6 @@
 
 import { pathToFileURL } from 'node:url';
 
-import { createQuestionPreviewRuntime } from './lib/question-preview/render.js';
 import { startQuestionPreviewServer } from './lib/question-preview/server.js';
 
 function logStartupProgress(message: string) {
@@ -14,7 +13,6 @@ async function main() {
 
   const started = await startQuestionPreviewServer({
     argv: process.argv.slice(2),
-    createRuntime: createQuestionPreviewRuntime,
     startupLogger: logStartupProgress,
   });
   const address = started.server.address();
@@ -22,6 +20,11 @@ async function main() {
   process.stdout.write(
     `PrairieLearn preview server listening on http://${started.options.host}:${port}\n`,
   );
+  for (const session of started.startupSessions) {
+    process.stdout.write(
+      `Local Preview Session ${session.previewSessionId}: ${session.courseDir}\n`,
+    );
+  }
 
   // Workspace containers are cleaned up by close(), so shut down gracefully
   // on Ctrl-C instead of leaking them until the next orphan-pruning startup.

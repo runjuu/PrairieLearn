@@ -1,5 +1,6 @@
 import type { LocalPreviewCourseSource } from './course-source.js';
 import type { QuestionPreviewDocumentInput, QuestionPreviewRenderMode } from './document.js';
+import type { QuestionPreviewEngineLifecycle } from './engine.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import type {
   QuestionPreviewCacheType,
@@ -42,6 +43,16 @@ interface CreateQuestionPreviewRuntimeLifecycleParams {
   localPreviewGeneratedFilesMax?: number;
   localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   runtimeOptions: QuestionPreviewRuntimeLifecycleStartupOptions;
+  urlPrefix?: string;
+}
+
+interface CreateQuestionPreviewCourseRuntimeLifecycleParams {
+  courseSource: LocalPreviewCourseSource;
+  engine: QuestionPreviewEngineLifecycle;
+  localPreviewGeneratedFilesMax?: number;
+  localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
+  renderMode: QuestionPreviewRenderMode;
+  urlPrefix: string;
 }
 
 function makeRuntimeStartupOptions({
@@ -72,20 +83,21 @@ export async function createQuestionPreviewRuntimeLifecycle({
   localPreviewGeneratedFilesMax,
   localPreviewWorkspaces = null,
   runtimeOptions,
+  urlPrefix = QUESTION_PREVIEW_URL_PREFIX,
 }: CreateQuestionPreviewRuntimeLifecycleParams): Promise<QuestionPreviewRuntimeLifecycle> {
   const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({
     max: localPreviewGeneratedFilesMax,
-    urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
+    urlPrefix,
   });
   const localPreviewSubmissionFiles = new LocalPreviewSubmissionFiles({
-    urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
+    urlPrefix,
   });
   const runtimeStartupOptions = makeRuntimeStartupOptions({
     localPreviewGeneratedFiles,
     localPreviewSubmissionFiles,
     localPreviewWorkspaces,
     runtimeOptions,
-    urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
+    urlPrefix,
   });
 
   const runtime = await createRuntime(runtimeStartupOptions);
@@ -95,6 +107,38 @@ export async function createQuestionPreviewRuntimeLifecycle({
     localPreviewSubmissionFiles,
     localPreviewWorkspaces,
     render: (input: QuestionPreviewDocumentInput) => runtime.render(input),
-    urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
+    urlPrefix,
+  };
+}
+
+export function createQuestionPreviewCourseRuntimeLifecycle({
+  courseSource,
+  engine,
+  localPreviewGeneratedFilesMax,
+  localPreviewWorkspaces = null,
+  renderMode,
+  urlPrefix,
+}: CreateQuestionPreviewCourseRuntimeLifecycleParams): QuestionPreviewRuntimeLifecycle {
+  const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({
+    max: localPreviewGeneratedFilesMax,
+    urlPrefix,
+  });
+  const localPreviewSubmissionFiles = new LocalPreviewSubmissionFiles({ urlPrefix });
+  const courseRenderer = engine.createCourseRenderer({
+    courseSource,
+    localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles,
+    localPreviewWorkspaces,
+    renderMode,
+    urlPrefix,
+  });
+
+  return {
+    close: () => courseRenderer.close(),
+    localPreviewGeneratedFiles,
+    localPreviewSubmissionFiles,
+    localPreviewWorkspaces,
+    render: (input) => courseRenderer.render(input),
+    urlPrefix,
   };
 }
