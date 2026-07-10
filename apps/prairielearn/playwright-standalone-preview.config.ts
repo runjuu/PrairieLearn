@@ -2,9 +2,9 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './src/tests/e2e',
-  testMatch: 'questionPreviewLegacy.spec.ts',
+  testMatch: 'standalonePreview.spec.ts',
   fullyParallel: false,
-  forbidOnly: !!process.env.CI,
+  forbidOnly: true,
   reporter: 'list',
   use: {
     ...devices['Desktop Chrome'],

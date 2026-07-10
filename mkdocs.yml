@@ -315,6 +315,7 @@ nav:
       - 'Running in Docker': dev-guide/installingLocal.md
       - dev-guide/installingNative.md
       - 'Quickstart': dev-guide/quickstart.md
+      - 'Standalone Preview Server': dev-guide/standalonePreviewServer.md
       - dev-guide/guide.md
       - 'Migrations': 'dev-guide/migrations/'
       - 'Server configuration': 'dev-guide/configJson.md'
