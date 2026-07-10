@@ -5,7 +5,8 @@ import type { Duplex } from 'node:stream';
 import type { RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 
-const CONTAINER_PATH_REGEX = /^\/workspace\/([0-9]+)\/container\/(.*)/;
+const CONTAINER_PATH_REGEX =
+  /^(?:\/preview-sessions\/[^/]+)?\/workspace\/([0-9]+)\/container\/(.*)/;
 
 /** The subset of workspace operations the container proxy depends on. */
 export interface PreviewWorkspaceProxyTargets {
