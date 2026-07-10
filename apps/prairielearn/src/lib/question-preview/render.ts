@@ -120,10 +120,28 @@ async function closePrairieLearnGlobalsForQuestionPreview() {
   load.close();
 }
 
+function capturePrairieLearnConfigForQuestionPreview() {
+  const previousConfig = {
+    cacheType: config.cacheType,
+    chunksConsumer: config.chunksConsumer,
+    devMode: config.devMode,
+    ensureExecutorImageAtStartup: config.ensureExecutorImageAtStartup,
+    questionTimeoutMilliseconds: config.questionTimeoutMilliseconds,
+    reportIntervalSec: config.reportIntervalSec,
+    workersCount: config.workersCount,
+    workersExecutionMode: config.workersExecutionMode,
+  };
+
+  return () => Object.assign(config, previousConfig);
+}
+
 class ProcessOwnedQuestionPreviewEngine implements QuestionPreviewEngineLifecycle {
   private closePromise: Promise<void> | null = null;
 
-  constructor(private readonly workerLifecycle: QuestionPreviewEngineLifecycle) {}
+  constructor(
+    private readonly workerLifecycle: QuestionPreviewEngineLifecycle,
+    private readonly restoreConfig: () => void,
+  ) {}
 
   createCourseRenderer(
     options: Parameters<QuestionPreviewEngineLifecycle['createCourseRenderer']>[0],
@@ -136,7 +154,11 @@ class ProcessOwnedQuestionPreviewEngine implements QuestionPreviewEngineLifecycl
       try {
         await this.workerLifecycle.close();
       } finally {
-        await closePrairieLearnGlobalsForQuestionPreview();
+        try {
+          await closePrairieLearnGlobalsForQuestionPreview();
+        } finally {
+          this.restoreConfig();
+        }
       }
     })();
     return this.closePromise;
@@ -183,16 +205,17 @@ export async function createQuestionPreviewEngine({
   workersExecutionMode = 'container',
 }: QuestionPreviewEngineStartupOptions): Promise<QuestionPreviewEngineLifecycle> {
   validateQuestionPreviewWorkersExecutionMode(workersExecutionMode);
-  await initPrairieLearnGlobalsForQuestionPreview({
-    cacheType,
-    devMode,
-    mode: workersExecutionMode,
-    questionTimeoutMilliseconds,
-    startupLogger,
-    workersCount,
-  });
+  const restoreConfig = capturePrairieLearnConfigForQuestionPreview();
 
   try {
+    await initPrairieLearnGlobalsForQuestionPreview({
+      cacheType,
+      devMode,
+      mode: workersExecutionMode,
+      questionTimeoutMilliseconds,
+      startupLogger,
+      workersCount,
+    });
     const workerLifecycle = await createQuestionPreviewEngineLifecycle({
       createGeneration: async () => {
         startupLogger?.(
@@ -209,9 +232,13 @@ export async function createQuestionPreviewEngine({
       },
     });
     startupLogger?.('PrairieLearn runtime initialized.');
-    return new ProcessOwnedQuestionPreviewEngine(workerLifecycle);
+    return new ProcessOwnedQuestionPreviewEngine(workerLifecycle, restoreConfig);
   } catch (err) {
-    await closePrairieLearnGlobalsForQuestionPreview();
+    try {
+      await closePrairieLearnGlobalsForQuestionPreview();
+    } finally {
+      restoreConfig();
+    }
     throw err;
   }
 }
