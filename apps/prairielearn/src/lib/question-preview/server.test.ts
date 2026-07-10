@@ -294,6 +294,7 @@ function testFailureDocument(diagnostics: QuestionPreviewDiagnostic[] = []) {
 <p>Check the preview server console for details.</p>
 </main>`),
     ok: false as const,
+    reason: 'render-failure' as const,
   };
 }
 
@@ -2343,6 +2344,79 @@ describe('question preview server direct preview route', () => {
         nodeAssert.doesNotMatch(response.body, /missing info\.json/, invalidPath);
       }
     } finally {
+      await started.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('distinguishes an unknown question from an existing question with invalid metadata', async () => {
+    const courseDir = await makeTempCourse();
+    await writeQuestionFile(
+      courseDir,
+      'broken/metadata',
+      'info.json',
+      JSON.stringify({ title: 'Missing required question metadata' }),
+    );
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--course-dir',
+        courseDir,
+        '--port',
+        '0',
+        '--render-mode',
+        'full',
+        '--workers-execution-mode',
+        'native',
+      ],
+    });
+
+    try {
+      const getUnknown = await fetch(
+        `${startupSessionUrl(started)}/questions/unknown/question?variant=1`,
+      );
+      const getUnknownHtml = await getUnknown.text();
+
+      assert.equal(getUnknown.status, 404);
+      assert.match(getUnknown.headers.get('content-type') ?? '', /text\/html/);
+      assert.match(getUnknownHtml, /Question preview failed/);
+      nodeAssert.doesNotMatch(getUnknownHtml, /unknown\/question|does not exist/);
+      nodeAssert.doesNotMatch(getUnknownHtml, new RegExp(courseDir.replaceAll('/', '\\/')));
+
+      const postUnknown = await fetch(
+        `${startupSessionUrl(started)}/questions/unknown/question?variant=1`,
+        {
+          body: new URLSearchParams({ __action: 'grade', ans: '42' }),
+          method: 'POST',
+        },
+      );
+      const postUnknownHtml = await postUnknown.text();
+
+      assert.equal(postUnknown.status, 404);
+      assert.equal(postUnknownHtml, getUnknownHtml);
+
+      for (const method of ['GET', 'POST'] as const) {
+        const response = await fetch(
+          `${startupSessionUrl(started)}/questions/broken/metadata?variant=1`,
+          method === 'GET'
+            ? undefined
+            : {
+                body: new URLSearchParams({ __action: 'grade', ans: '42' }),
+                method,
+              },
+        );
+        const html = await response.text();
+
+        assert.equal(response.status, 422);
+        assert.equal(html, getUnknownHtml);
+        nodeAssert.doesNotMatch(html, /broken\/metadata|Missing required question metadata/);
+        nodeAssert.doesNotMatch(html, new RegExp(courseDir.replaceAll('/', '\\/')));
+      }
+      assert.equal(consoleError.mock.calls.length, 2);
+      assert.equal(consoleError.mock.calls[0]?.[0], 'Question preview render failed:');
+      assert.equal(consoleError.mock.calls[1]?.[0], 'Question preview render failed:');
+    } finally {
+      consoleError.mockRestore();
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
     }

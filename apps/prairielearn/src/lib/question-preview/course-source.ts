@@ -44,6 +44,10 @@ export class InvalidLocalPreviewCourseError extends Error {
   override name = 'InvalidLocalPreviewCourseError';
 }
 
+export class QuestionPreviewQuestionNotFoundError extends ExpectedQuestionPreviewError {
+  override name = 'QuestionPreviewQuestionNotFoundError';
+}
+
 function isPathInsideRoot(root: string, candidate: string) {
   const relativePath = path.relative(root, candidate);
   return (
@@ -173,14 +177,19 @@ export async function createLocalPreviewCourseSource(
     },
     async readQuestionInfo(qid) {
       let questionDir: string;
-      let infoPath: string;
       try {
         questionDir = await fs.realpath(path.join(questionsDir, ...qid.pathSegments));
-        infoPath = await fs.realpath(path.join(questionDir, 'info.json'));
+        if (!(await fs.stat(questionDir)).isDirectory()) {
+          throw new QuestionPreviewQuestionNotFoundError(
+            `Question "${qid.decoded}" does not exist.`,
+            { data: { qid: qid.decoded }, phase: 'metadata' },
+          );
+        }
       } catch (err) {
+        if (err instanceof QuestionPreviewQuestionNotFoundError) throw err;
         if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
-          throw new ExpectedQuestionPreviewError(
-            `Question "${qid.decoded}" is missing info.json.`,
+          throw new QuestionPreviewQuestionNotFoundError(
+            `Question "${qid.decoded}" does not exist.`,
             { data: { qid: qid.decoded }, phase: 'metadata' },
           );
         }
@@ -191,6 +200,19 @@ export async function createLocalPreviewCourseSource(
           `Question "${qid.decoded}" escapes the canonical course root.`,
           { data: { qid: qid.decoded }, phase: 'metadata' },
         );
+      }
+
+      let infoPath: string;
+      try {
+        infoPath = await fs.realpath(path.join(questionDir, 'info.json'));
+      } catch (err) {
+        if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
+          throw new ExpectedQuestionPreviewError(
+            `Question "${qid.decoded}" is missing info.json.`,
+            { data: { qid: qid.decoded }, phase: 'metadata' },
+          );
+        }
+        throw err;
       }
       if (!isPathInsideRoot(questionDir, infoPath)) {
         throw new ExpectedQuestionPreviewError(

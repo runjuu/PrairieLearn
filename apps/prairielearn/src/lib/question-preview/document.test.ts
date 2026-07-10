@@ -556,7 +556,7 @@ describe('question preview document', () => {
     }
   });
 
-  it('returns diagnostics for missing question metadata', async () => {
+  it('classifies an unknown question separately from render failures', async () => {
     const courseDir = await makeTempCourse();
 
     try {
@@ -566,13 +566,14 @@ describe('question preview document', () => {
           variantSeed: '1',
         });
 
-        assert.equal(result.ok, false);
+        nodeAssert.equal(result.ok, false);
+        assert.equal(result.reason, 'question-not-found');
         assert.equal('payload' in result, false);
         assertGenericFailureDocument(result.documentHtml);
-        assert.notMatch(result.documentHtml, /missing info\.json/);
+        assert.notMatch(result.documentHtml, /does not exist/);
         assert.equal(result.diagnostics[0].fatal, true);
         assert.equal(result.diagnostics[0].phase, 'metadata');
-        assert.match(result.diagnostics[0].message, /missing info\.json/);
+        assert.match(result.diagnostics[0].message, /does not exist/);
         assert.equal(JSON.stringify(result.diagnostics[0]).includes(courseDir), false);
       });
     } finally {
@@ -595,7 +596,8 @@ describe('question preview document', () => {
           variantSeed: '1',
         });
 
-        assert.equal(result.ok, false);
+        nodeAssert.equal(result.ok, false);
+        assert.equal(result.reason, 'render-failure');
         assert.equal('payload' in result, false);
         assertGenericFailureDocument(result.documentHtml);
         assert.equal(result.diagnostics[0].fatal, true);

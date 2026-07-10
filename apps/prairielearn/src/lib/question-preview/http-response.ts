@@ -161,6 +161,14 @@ export function mapQuestionPreviewDocumentResponse(
     });
   }
 
+  if (result.reason === 'question-not-found') {
+    return action({
+      html: result.documentHtml,
+      kind: 'html',
+      status: 404,
+    });
+  }
+
   return action(
     {
       html: result.documentHtml,

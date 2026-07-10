@@ -15,7 +15,10 @@ import { config } from '../config.js';
 import type { Course, Question, Submission, Variant } from '../db-types.js';
 
 import { makeQuestionPreviewAssetUrls } from './assets.js';
-import type { LocalPreviewCourseSource } from './course-source.js';
+import {
+  type LocalPreviewCourseSource,
+  QuestionPreviewQuestionNotFoundError,
+} from './course-source.js';
 import { QuestionPreviewEngineGenerationError } from './engine-error.js';
 import { ExpectedQuestionPreviewError, type QuestionPreviewPhase } from './expected-error.js';
 import { type LocalPreviewGeneratedFiles } from './generated-files.js';
@@ -79,6 +82,7 @@ interface QuestionPreviewDocumentSuccess {
 export interface QuestionPreviewDocumentFailure {
   diagnostics: QuestionPreviewDiagnostic[];
   documentHtml: string;
+  reason: 'question-not-found' | 'render-failure';
   ok: false;
 }
 
@@ -435,11 +439,13 @@ function makeQuestionPreviewSuccessResult({
 
 export function makeQuestionPreviewDocumentFailureResult(
   diagnostics: QuestionPreviewDiagnostic[],
+  reason: QuestionPreviewDocumentFailure['reason'] = 'render-failure',
 ): QuestionPreviewDocumentFailure {
   return {
     diagnostics,
     documentHtml: QUESTION_PREVIEW_ERROR_DOCUMENT,
     ok: false,
+    reason,
   };
 }
 
@@ -499,7 +505,18 @@ async function renderQuestionPreviewDocumentResult({
     validateQuestionPreviewVariantSeed(variantSeed);
 
     phase = 'metadata';
-    const info = await courseSource.readQuestionInfo(qid);
+    let info;
+    try {
+      info = await courseSource.readQuestionInfo(qid);
+    } catch (err) {
+      if (err instanceof QuestionPreviewQuestionNotFoundError) {
+        return makeQuestionPreviewDocumentFailureResult(
+          [diagnosticFromError(err, { courseSource, phase })],
+          'question-not-found',
+        );
+      }
+      throw err;
+    }
     const { caller, course, question } = makeLocalPreviewQuestionRows({
       courseSource,
       info,
