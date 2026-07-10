@@ -4,7 +4,11 @@ import type { AddressInfo, Socket } from 'node:net';
 import express from 'express';
 import { afterEach, assert, beforeEach, describe, it } from 'vitest';
 
-import { type PreviewWorkspaceProxyTargets, makePreviewWorkspaceProxy } from './workspace-proxy.js';
+import {
+  type PreviewWorkspaceProxy,
+  type PreviewWorkspaceProxyTargets,
+  makePreviewWorkspaceProxy,
+} from './workspace-proxy.js';
 
 interface FakeTargets extends PreviewWorkspaceProxyTargets {
   heartbeats: string[];
@@ -68,6 +72,7 @@ async function fetchText(port: number, path: string, headers: Record<string, str
 describe('preview workspace proxy', () => {
   let containerServer: StartedServer | null = null;
   let previewServer: StartedServer | null = null;
+  let previewProxy: PreviewWorkspaceProxy;
   let targets: FakeTargets;
   let containerPort: number;
   let previewPort: number;
@@ -90,6 +95,7 @@ describe('preview workspace proxy', () => {
     containerPort = containerServer.port;
 
     const proxy = makePreviewWorkspaceProxy({ targets });
+    previewProxy = proxy;
     const app = express();
     app.use(proxy.middleware);
     app.use((_req, res) => {
@@ -194,6 +200,33 @@ describe('preview workspace proxy', () => {
     } finally {
       socket.destroy();
     }
+  });
+
+  it('closes active websocket connections with the owning Local Preview Session', async () => {
+    targets.targetsById.set('1', { host: '127.0.0.1', port: containerPort, rewriteUrl: true });
+    const socket = await new Promise<Socket>((resolve, reject) => {
+      const request = http.request({
+        headers: {
+          Connection: 'Upgrade',
+          'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+          'Sec-WebSocket-Version': '13',
+          Upgrade: 'websocket',
+        },
+        host: '127.0.0.1',
+        path: '/workspace/1/container/socket',
+        port: previewPort,
+      });
+      request.on('upgrade', (_res, upgradeSocket) => resolve(upgradeSocket));
+      request.on('error', reject);
+      request.end();
+    });
+
+    socket.resume();
+    const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+    previewProxy.close();
+    await closed;
+
+    assert.isTrue(socket.destroyed);
   });
 
   it('responds with a gateway error when the container is unreachable', async () => {

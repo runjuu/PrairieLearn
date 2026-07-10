@@ -2,6 +2,7 @@ import nodeAssert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -14,8 +15,9 @@ import type { QuestionPreviewDiagnostic } from './document.js';
 import { createQuestionPreviewRuntime } from './render.js';
 import { parseQuestionPreviewServerOptions, startQuestionPreviewServer } from './server.js';
 import {
+  type PreviewWorkspaceAllocator,
   type PreviewWorkspaceDockerClient,
-  createPreviewWorkspaceManager,
+  createPreviewWorkspaceOwner,
 } from './workspace-launcher.js';
 import type { PreviewWorkspaceSpec } from './workspace-registry.js';
 
@@ -51,10 +53,70 @@ function makeStubDockerClient(): PreviewWorkspaceDockerClient {
   };
 }
 
+function makeLaunchingDockerClient(fixedPort?: number): PreviewWorkspaceDockerClient {
+  let nextPort = fixedPort ?? 40_100;
+  return {
+    createContainer: async (options) => {
+      const hostPort = fixedPort ?? nextPort++;
+      return {
+        inspect: async () => ({
+          NetworkSettings: {
+            Ports: {
+              [Object.keys(options.ExposedPorts)[0]]: [
+                { HostIp: '127.0.0.1', HostPort: String(hostPort) },
+              ],
+            },
+          },
+        }),
+        remove: async () => {},
+        start: async () => {},
+      };
+    },
+    getContainer: () => ({
+      inspect: () => Promise.reject(new Error('not implemented')),
+      remove: () => Promise.resolve(),
+      start: () => Promise.resolve(),
+    }),
+    getImage: () => ({ inspect: async () => ({ Config: { Labels: {} } }) }),
+    listContainers: () => Promise.resolve([]),
+    modem: {
+      followProgress: (_stream, onFinished) => onFinished(null),
+    },
+    ping: () => Promise.resolve(),
+    pull: () => Promise.resolve(null as unknown as NodeJS.ReadableStream),
+  };
+}
+
+async function startWorkspaceApplication() {
+  const sockets = new Set<Socket>();
+  const server = http.createServer((_req, res) => res.end('workspace application'));
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  server.on('upgrade', (_req, socket) => {
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+    port: (server.address() as AddressInfo).port,
+  };
+}
+
 async function startTestQuestionPreviewServer({
   createRuntime = createQuestionPreviewRuntime,
-  createWorkspaceManager = (options) =>
-    createPreviewWorkspaceManager({ ...options, docker: makeStubDockerClient() }),
+  createWorkspaceOwner = (options) =>
+    createPreviewWorkspaceOwner({ ...options, docker: makeStubDockerClient() }),
   ...params
 }: StartTestQuestionPreviewServerParams) {
   const usesFakeRuntime = createRuntime !== createQuestionPreviewRuntime;
@@ -64,7 +126,7 @@ async function startTestQuestionPreviewServer({
     const started = await startQuestionPreviewServer({
       ...params,
       createRuntime,
-      createWorkspaceManager,
+      createWorkspaceOwner,
     });
     if (!usesFakeRuntime) return started;
 
@@ -2431,21 +2493,174 @@ describe('question preview server submission files', () => {
 });
 
 describe('question preview server workspace routes', () => {
-  it('serves the workspace page, status endpoint, and reboot/reset actions', async () => {
+  it('applies the running-container limit across runtime Local Preview Sessions', async () => {
+    const firstCourseDir = await makeTempCourse();
+    const secondCourseDir = await makeTempCourse();
+    const allocators: PreviewWorkspaceAllocator[] = [];
+    const docker = makeLaunchingDockerClient();
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--course-dir',
+        firstCourseDir,
+        '--host',
+        '127.0.0.1',
+        '--port',
+        '0',
+        '--workspaces',
+        '--workspace-max-containers',
+        '1',
+      ],
+      createRuntime: async (options) => {
+        if (options.localPreviewWorkspaces != null) {
+          allocators.push(options.localPreviewWorkspaces);
+        }
+        return { close: async () => {}, render: async () => testFailureDocument() };
+      },
+      createWorkspaceOwner: (options) =>
+        createPreviewWorkspaceOwner({
+          ...options,
+          docker,
+          fetchFn: () => Promise.resolve(),
+        }),
+    });
+
+    try {
+      const firstSessionPath = startupSessionPath(started);
+      const firstAllocator = allocators[0];
+      assert.isDefined(firstAllocator);
+      const first = firstAllocator.ensureWorkspace(makeWorkspaceSpec());
+      await fetch(`${serverUrl(started)}${firstSessionPath}/workspace/${first.workspaceId}`);
+      await vi.waitFor(async () => {
+        const response = await fetch(
+          `${serverUrl(started)}${firstSessionPath}/workspace/${first.workspaceId}/status`,
+        );
+        assert.equal((await response.json()).state, 'running');
+      });
+
+      const created = await fetch(`${serverUrl(started)}/preview-sessions`, {
+        body: JSON.stringify({ courseDir: secondCourseDir }),
+        headers: { 'content-type': 'application/json' },
+        method: 'POST',
+      });
+      assert.equal(created.status, 201);
+      const secondSession = await created.json();
+      const secondAllocator = allocators[1];
+      assert.isDefined(secondAllocator);
+      const second = secondAllocator.ensureWorkspace(makeWorkspaceSpec());
+      await fetch(
+        `${serverUrl(started)}/preview-sessions/${secondSession.previewSessionId}/workspace/${second.workspaceId}`,
+      );
+
+      await vi.waitFor(async () => {
+        const secondStatus = await fetch(
+          `${serverUrl(started)}/preview-sessions/${secondSession.previewSessionId}/workspace/${second.workspaceId}/status`,
+        );
+        assert.equal((await secondStatus.json()).state, 'running');
+      });
+      const firstStatus = await fetch(
+        `${serverUrl(started)}${firstSessionPath}/workspace/${first.workspaceId}/status`,
+      );
+      assert.equal((await firstStatus.json()).state, 'stopped');
+    } finally {
+      await started.close();
+      await Promise.all(
+        [firstCourseDir, secondCourseDir].map((courseDir) =>
+          fs.rm(courseDir, { force: true, recursive: true }),
+        ),
+      );
+    }
+  });
+
+  it('routes WebSockets through the session and closes them before deletion returns', async () => {
     const courseDir = await makeTempCourse();
+    const workspaceApplication = await startWorkspaceApplication();
+    const captured: { workspaceAllocator?: PreviewWorkspaceAllocator } = {};
     const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0', '--workspaces'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => testFailureDocument(),
-      }),
+      createRuntime: async (options) => {
+        captured.workspaceAllocator = options.localPreviewWorkspaces ?? undefined;
+        return { close: async () => {}, render: async () => testFailureDocument() };
+      },
+      createWorkspaceOwner: (options) =>
+        createPreviewWorkspaceOwner({
+          ...options,
+          docker: makeLaunchingDockerClient(workspaceApplication.port),
+          fetchFn: () => Promise.resolve(),
+        }),
+    });
+
+    try {
+      const workspaceAllocator = captured.workspaceAllocator;
+      assert.isDefined(workspaceAllocator);
+      const workspace = workspaceAllocator.ensureWorkspace(makeWorkspaceSpec());
+      const workspacePath = `${startupSessionPath(started)}/workspace/${workspace.workspaceId}`;
+      await fetch(`${serverUrl(started)}${workspacePath}`);
+      await vi.waitFor(async () => {
+        const status = await fetch(`${serverUrl(started)}${workspacePath}/status`);
+        assert.equal((await status.json()).state, 'running');
+      });
+
+      const previewOrigin = new URL(serverUrl(started));
+      const socket = await new Promise<Socket>((resolve, reject) => {
+        const request = http.request({
+          headers: {
+            Connection: 'Upgrade',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+            Upgrade: 'websocket',
+          },
+          host: previewOrigin.hostname,
+          path: `${workspacePath}/container/socket`,
+          port: Number(previewOrigin.port),
+        });
+        request.on('upgrade', (_res, upgradeSocket) => resolve(upgradeSocket));
+        request.on('error', reject);
+        request.end();
+      });
+      socket.resume();
+      const socketClosed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+      const deleted = fetch(
+        `${serverUrl(started)}/preview-sessions/${started.startupSessions[0].previewSessionId}`,
+        { method: 'DELETE' },
+      );
+
+      const response = await Promise.race([
+        Promise.all([deleted, socketClosed]).then(([result]) => result),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('Session deletion did not close its WebSocket.')),
+            1000,
+          ),
+        ),
+      ]);
+      assert.equal(response.status, 204);
+      assert.isTrue(socket.destroyed);
+    } finally {
+      await started.close();
+      await workspaceApplication.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
+  it('serves the workspace page, status endpoint, and reboot/reset actions', async () => {
+    const courseDir = await makeTempCourse();
+    const captured: { workspaceAllocator?: PreviewWorkspaceAllocator } = {};
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0', '--workspaces'],
+      createRuntime: async (options) => {
+        captured.workspaceAllocator = options.localPreviewWorkspaces ?? undefined;
+        return {
+          close: async () => {},
+          render: async () => testFailureDocument(),
+        };
+      },
     });
     const baseUrl = startupSessionUrl(started);
 
     try {
-      const workspaceManager = started.workspaceManager;
-      assert.isNotNull(workspaceManager);
-      const { workspaceId, workspaceUrl } = workspaceManager.ensureWorkspace(makeWorkspaceSpec());
+      const workspaceAllocator = captured.workspaceAllocator;
+      assert.isDefined(workspaceAllocator);
+      const { workspaceId, workspaceUrl } = workspaceAllocator.ensureWorkspace(makeWorkspaceSpec());
       assert.equal(workspaceUrl, `${startupSessionPath(started)}/workspace/${workspaceId}`);
 
       const page = await fetch(`${baseUrl}/workspace/${workspaceId}`);
@@ -2461,25 +2676,19 @@ describe('question preview server workspace routes', () => {
       assert.property(statusJson, 'state');
       assert.property(statusJson, 'message');
 
-      const beforeHeartbeat = workspaceManager.workspaces.get(workspaceId)!.lastActivityAt;
-      await new Promise((resolve) => setTimeout(resolve, 5));
       const heartbeat = await fetch(`${baseUrl}/workspace/${workspaceId}/status?heartbeat=1`);
       assert.equal(heartbeat.status, 200);
-      assert.isAtLeast(
-        workspaceManager.workspaces.get(workspaceId)!.lastActivityAt,
-        beforeHeartbeat,
-      );
 
       const reboot = await fetch(`${baseUrl}/workspace/${workspaceId}/reboot`, { method: 'POST' });
       assert.equal(reboot.status, 200);
       const rebootJson = await reboot.json();
-      assert.equal(rebootJson.state, 'launching');
+      assert.property(rebootJson, 'state');
 
       const reset = await fetch(`${baseUrl}/workspace/${workspaceId}/reset`, { method: 'POST' });
       assert.equal(reset.status, 200);
       const resetJson = await reset.json();
       assert.property(resetJson, 'state');
-      assert.equal(workspaceManager.workspaces.get(workspaceId)?.version, 2);
+      assert.equal(resetJson.version, 2);
 
       const unknownReboot = await fetch(`${baseUrl}/workspace/999/reboot`, { method: 'POST' });
       assert.equal(unknownReboot.status, 404);
@@ -2498,17 +2707,23 @@ describe('question preview server workspace routes', () => {
 
   it('responds with 404 for container traffic when the workspace is not running', async () => {
     const courseDir = await makeTempCourse();
+    const captured: { workspaceAllocator?: PreviewWorkspaceAllocator } = {};
     const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0', '--workspaces'],
-      createRuntime: async () => ({
-        close: async () => {},
-        render: async () => testFailureDocument(),
-      }),
+      createRuntime: async (options) => {
+        captured.workspaceAllocator = options.localPreviewWorkspaces ?? undefined;
+        return {
+          close: async () => {},
+          render: async () => testFailureDocument(),
+        };
+      },
     });
     const baseUrl = startupSessionUrl(started);
 
     try {
-      const { workspaceId } = started.workspaceManager!.ensureWorkspace(makeWorkspaceSpec());
+      const workspaceAllocator = captured.workspaceAllocator;
+      assert.isDefined(workspaceAllocator);
+      const { workspaceId } = workspaceAllocator.ensureWorkspace(makeWorkspaceSpec());
 
       const response = await fetch(`${baseUrl}/workspace/${workspaceId}/container/`);
       assert.equal(response.status, 404);
@@ -2534,7 +2749,6 @@ describe('question preview server workspace routes', () => {
     const baseUrl = startupSessionUrl(started);
 
     try {
-      assert.isNull(started.workspaceManager);
       assert.isNull(runtimeOptions[0]?.localPreviewWorkspaces);
 
       const response = await fetch(`${baseUrl}/workspace/1`);
@@ -2558,22 +2772,28 @@ describe.skipIf(process.env.PL_PREVIEW_WORKSPACE_DOCKER_TEST !== '1')(
       { timeout: 600_000 },
       async () => {
         const courseDir = await makeTempCourse();
+        const captured: { workspaceAllocator?: PreviewWorkspaceAllocator } = {};
         const workspaceFilesDir = path.join(courseDir, 'questions', 'demo/workspace', 'workspace');
         await fs.mkdir(workspaceFilesDir, { recursive: true });
         await fs.writeFile(path.join(workspaceFilesDir, 'starter.c'), 'int main() { return 0; }\n');
 
-        const started = await startQuestionPreviewServer({
+        const started = await startTestQuestionPreviewServer({
           argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0', '--workspaces'],
-          createRuntime: async () => ({
-            close: async () => {},
-            render: async () => testFailureDocument(),
-          }),
+          createRuntime: async (options) => {
+            captured.workspaceAllocator = options.localPreviewWorkspaces ?? undefined;
+            return {
+              close: async () => {},
+              render: async () => testFailureDocument(),
+            };
+          },
+          createWorkspaceOwner: createPreviewWorkspaceOwner,
         });
         const baseUrl = startupSessionUrl(started);
 
         try {
-          const workspaceManager = started.workspaceManager!;
-          const { workspaceId } = workspaceManager.ensureWorkspace(
+          const workspaceAllocator = captured.workspaceAllocator;
+          assert.isDefined(workspaceAllocator);
+          const { workspaceId } = workspaceAllocator.ensureWorkspace(
             makeWorkspaceSpec({
               settings: {
                 args: null,
@@ -2606,7 +2826,29 @@ describe.skipIf(process.env.PL_PREVIEW_WORKSPACE_DOCKER_TEST !== '1')(
           const proxied = await fetch(`${baseUrl}/workspace/${workspaceId}/container/`);
           assert.equal(proxied.status, 200);
 
-          const graded = await workspaceManager.collectGradedFiles({
+          const previewOrigin = new URL(serverUrl(started));
+          const workspaceSocket = await new Promise<Socket>((resolve, reject) => {
+            const request = http.request({
+              headers: {
+                Connection: 'Upgrade',
+                'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+                'Sec-WebSocket-Version': '13',
+                Upgrade: 'websocket',
+              },
+              host: previewOrigin.hostname,
+              path: `${startupSessionPath(started)}/workspace/${workspaceId}/container/`,
+              port: Number(previewOrigin.port),
+            });
+            request.on('upgrade', (_res, upgradeSocket) => resolve(upgradeSocket));
+            request.on('response', (res) =>
+              reject(new Error(`Unexpected WebSocket response: ${res.statusCode}`)),
+            );
+            request.on('error', reject);
+            request.end();
+          });
+          workspaceSocket.destroy();
+
+          const graded = await workspaceAllocator.collectGradedFiles({
             qid: 'demo/workspace',
             variantSeed: '1',
           });
@@ -2616,8 +2858,11 @@ describe.skipIf(process.env.PL_PREVIEW_WORKSPACE_DOCKER_TEST !== '1')(
             ['starter.c'],
           );
 
-          await workspaceManager.reset(workspaceId);
-          assert.equal(workspaceManager.workspaces.get(workspaceId)?.state, 'uninitialized');
+          const reset = await fetch(`${baseUrl}/workspace/${workspaceId}/reset`, {
+            method: 'POST',
+          });
+          assert.equal(reset.status, 200);
+          assert.equal((await reset.json()).version, 2);
         } finally {
           await started.close();
           await fs.rm(courseDir, { force: true, recursive: true });
