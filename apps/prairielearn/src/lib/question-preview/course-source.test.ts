@@ -36,6 +36,27 @@ describe('Local Preview Course Source', () => {
     }
   });
 
+  it('rejects a course without a usable questions directory', async () => {
+    const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-course-source-'));
+    await fs.writeFile(
+      path.join(courseDir, 'infoCourse.json'),
+      JSON.stringify({
+        name: 'TST 101',
+        title: 'Preview source testing',
+        topics: [{ color: 'blue1', name: 'Testing' }],
+      }),
+    );
+
+    try {
+      await nodeAssert.rejects(createLocalPreviewCourseSource(courseDir), {
+        message: 'Invalid Local Preview Course Source: questions directory is not usable.',
+        name: 'InvalidLocalPreviewCourseError',
+      });
+    } finally {
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('registers canonical course metadata with a UTC timezone fallback', async () => {
     const courseDir = await makeCourseRoot({
       name: 'TST 101',

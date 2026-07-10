@@ -413,6 +413,173 @@ describe('Local Preview Session contract', () => {
     }
   });
 
+  it('advertises exact full-rendering and Preview Workspace capabilities', async () => {
+    const started = await startTestQuestionPreviewServer({
+      argv: [
+        '--port',
+        '0',
+        '--render-mode',
+        'full',
+        '--workers-count',
+        '4',
+        '--workspaces',
+        '--workspace-idle-timeout-ms',
+        '1000',
+        '--workspace-max-containers',
+        '2',
+        '--workspace-start-timeout-ms',
+        '2000',
+      ],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => testFailureDocument(),
+      }),
+      createWorkspaceOwner: (options) =>
+        createPreviewWorkspaceOwner({
+          ...options,
+          docker: makeLaunchingDockerClient(),
+          fetchFn: () => Promise.resolve(),
+        }),
+    });
+
+    try {
+      const metadata = await fetch(`${serverUrl(started)}/metadata`);
+      assert.equal(metadata.status, 200);
+      assert.match(metadata.headers.get('content-type') ?? '', /application\/json/);
+      assert.deepEqual(await metadata.json(), {
+        apiVersion: 'experimental-1',
+        prairieLearnVersion: '1.0.0',
+        previewSessionsEndpoint: '/preview-sessions',
+        features: {
+          defaultRenderMode: 'full',
+          grading: true,
+          renderModes: ['question-only', 'full'],
+          workspaceControls: ['reboot', 'reset'],
+          workspaces: true,
+        },
+        limits: {
+          questionTimeoutMs: 5000,
+          workersCount: 4,
+          workspaceIdleTimeoutMs: 1000,
+          workspaceMaxContainers: 2,
+          workspaceStartTimeoutMs: 2000,
+        },
+      });
+    } finally {
+      await started.close();
+    }
+  });
+
+  it('returns stable control-plane errors and rejects removed browser routes', async () => {
+    const courseDir = await makeTempCourse();
+    const started = await startTestQuestionPreviewServer({
+      argv: ['--port', '0'],
+      createRuntime: async () => ({
+        close: async () => {},
+        render: async () => testFailureDocument(),
+      }),
+    });
+
+    try {
+      const baseUrl = serverUrl(started);
+      const malformed = await fetch(`${baseUrl}/preview-sessions`, {
+        body: '{',
+        headers: { 'content-type': 'application/json' },
+        method: 'POST',
+      });
+      assert.equal(malformed.status, 400);
+      assert.match(malformed.headers.get('content-type') ?? '', /application\/json/);
+      assert.deepEqual(await malformed.json(), {
+        error: { code: 'invalid_request', message: 'The request body is invalid.' },
+      });
+
+      const relative = await fetch(`${baseUrl}/preview-sessions`, {
+        body: JSON.stringify({ courseDir: 'relative/course' }),
+        headers: { 'content-type': 'application/json' },
+        method: 'POST',
+      });
+      assert.equal(relative.status, 400);
+      assert.deepEqual(await relative.json(), {
+        error: {
+          code: 'invalid_request',
+          details: { courseDir: 'relative/course' },
+          message: 'courseDir must be an absolute path.',
+        },
+      });
+
+      const invalidCourse = await fetch(`${baseUrl}/preview-sessions`, {
+        body: JSON.stringify({ courseDir: path.join(courseDir, 'missing') }),
+        headers: { 'content-type': 'application/json' },
+        method: 'POST',
+      });
+      assert.equal(invalidCourse.status, 422);
+      assert.deepEqual(await invalidCourse.json(), {
+        error: {
+          code: 'invalid_course_dir',
+          details: { courseDir: path.join(courseDir, 'missing') },
+          message: 'The course directory does not exist or is not a PrairieLearn course.',
+        },
+      });
+
+      const unknownDelete = await fetch(`${baseUrl}/preview-sessions/pvs_0000000000000000000000`, {
+        method: 'DELETE',
+      });
+      assert.equal(unknownDelete.status, 404);
+      assert.deepEqual(await unknownDelete.json(), {
+        error: {
+          code: 'preview_session_not_found',
+          message: 'The Local Preview Session does not exist.',
+        },
+      });
+
+      for (const removedPath of [
+        '/questions/demo/example',
+        '/preview-render/clientFilesCourse/course.txt',
+        '/workspace/1',
+        '/api/questions',
+      ]) {
+        const response = await fetch(`${baseUrl}${removedPath}`);
+        assert.equal(response.status, 404, removedPath);
+        assert.equal(await response.text(), '', removedPath);
+      }
+
+      for (const [method, requestPath] of [
+        ['POST', '/health'],
+        ['POST', '/metadata'],
+        ['PUT', '/preview-sessions'],
+      ]) {
+        const response = await fetch(`${baseUrl}${requestPath}`, { method });
+        assert.equal(response.status, 404, `${method} ${requestPath}`);
+      }
+    } finally {
+      await started.close();
+    }
+
+    const unavailable = await startTestQuestionPreviewServer({
+      argv: ['--port', '0'],
+      createRuntime: async () => {
+        throw new Error('worker pool unavailable');
+      },
+    });
+    try {
+      const response = await fetch(`${serverUrl(unavailable)}/preview-sessions`, {
+        body: JSON.stringify({ courseDir }),
+        headers: { 'content-type': 'application/json' },
+        method: 'POST',
+      });
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        error: {
+          code: 'capability_unavailable',
+          message: 'The Local Preview Session could not be created.',
+        },
+      });
+    } finally {
+      await unavailable.close();
+      await fs.rm(courseDir, { force: true, recursive: true });
+    }
+  });
+
   it('keeps duplicate-course sessions isolated and closes startup atomically', async () => {
     const courseDir = await makeTempCourse();
     const missingCourseDir = path.join(courseDir, 'missing');

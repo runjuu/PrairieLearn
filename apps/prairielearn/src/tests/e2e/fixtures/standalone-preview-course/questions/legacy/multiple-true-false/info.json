@@ -1,0 +1,11 @@
+{
+  "options": {
+    "falseStatements": ["Two plus two is five."],
+    "text": "Classify each arithmetic statement.",
+    "trueStatements": ["Two plus two is four."]
+  },
+  "title": "Multiple true false browser contract",
+  "topic": "Testing",
+  "type": "MultipleTrueFalse",
+  "uuid": "11111111-1111-4111-8111-111111111225"
+}
