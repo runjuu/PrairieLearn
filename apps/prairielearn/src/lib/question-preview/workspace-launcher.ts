@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -15,6 +16,7 @@ import {
 } from './workspace-files.js';
 import {
   LocalPreviewWorkspaces,
+  type PreviewWorkspaceEntry,
   type PreviewWorkspaceSettings,
   type PreviewWorkspaceSpec,
   type PreviewWorkspaceTarget,
@@ -123,8 +125,20 @@ export interface PreviewWorkspaceManagerOptions {
   now?: () => number;
   pid?: number;
   pullPolicy: PreviewWorkspacePullPolicy;
+  previewSessionId?: string;
   startTimeoutMs: number;
   urlPrefix?: string;
+}
+
+export type PreviewWorkspaceOwnerOptions = Omit<
+  PreviewWorkspaceManagerOptions,
+  'courseDir' | 'urlPrefix'
+>;
+
+export interface PreviewWorkspaceSessionOptions {
+  courseDir: string;
+  previewSessionId: string;
+  urlPrefix: string;
 }
 
 export interface PreviewWorkspaceManager extends PreviewWorkspaceAllocator {
@@ -136,7 +150,16 @@ export interface PreviewWorkspaceManager extends PreviewWorkspaceAllocator {
   reset(id: string): Promise<void>;
   resolveContainerTarget(id: string): { host: string; port: number; rewriteUrl: boolean } | null;
   sweepIdle(): Promise<void>;
-  workspaces: LocalPreviewWorkspaces;
+  containerUrl(id: string): string;
+  getWorkspace(id: string): PreviewWorkspaceEntry | null;
+  workspaceUrl(id: string): string;
+}
+
+export interface PreviewWorkspaceOwner {
+  close(): Promise<void>;
+  createSession(options: PreviewWorkspaceSessionOptions): PreviewWorkspaceManager;
+  pruneOrphans(): Promise<string[]>;
+  sweepIdle(): Promise<void>;
 }
 
 /**
@@ -278,7 +301,7 @@ interface OwnedContainer {
 }
 
 class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
-  readonly workspaces: LocalPreviewWorkspaces;
+  private readonly workspaces: LocalPreviewWorkspaces;
 
   private closed = false;
   private readonly containerNetwork: string | undefined;
@@ -290,18 +313,26 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   private readonly healthCheckIntervalMs: number;
   private readonly healthCheckTimeoutMs: number;
   private readonly homeRoot: string;
+  private readonly homeRootLabel: string;
+  private readonly homeSubpathRoot: string;
   private readonly homeVolume: string | undefined;
-  private readonly idleSweepTimer: NodeJS.Timeout;
+  private readonly idleSweepTimer: NodeJS.Timeout | null;
   private readonly idleTimeoutMs: number;
   private readonly logger: (message: string) => void;
   private readonly maxRunningContainers: number;
   private readonly now: () => number;
   private readonly pendingLaunches = new Map<string, Promise<void>>();
   private readonly pid: number;
+  private readonly previewSessionId: string | null;
   private readonly pullPolicy: PreviewWorkspacePullPolicy;
   private readonly startTimeoutMs: number;
+  private readonly owner: PreviewWorkspaceOwnerImpl | null;
 
-  constructor(options: PreviewWorkspaceManagerOptions) {
+  constructor(
+    options: PreviewWorkspaceManagerOptions,
+    owner: PreviewWorkspaceOwnerImpl | null = null,
+  ) {
+    this.owner = owner;
     this.containerNetwork = options.containerNetwork;
     this.courseDir = options.courseDir;
     // dockerode's Docker satisfies our deliberately-minimal client seam, but the
@@ -317,13 +348,19 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     };
     this.healthCheckIntervalMs = options.healthCheckIntervalMs ?? 1000;
     this.healthCheckTimeoutMs = options.healthCheckTimeoutMs ?? 10_000;
-    this.homeRoot = options.homeRoot;
+    this.homeSubpathRoot = options.homeRoot;
+    this.homeRoot =
+      options.previewSessionId == null
+        ? options.homeRoot
+        : path.join(options.homeRoot, options.previewSessionId);
     this.homeVolume = options.homeVolume;
+    this.homeRootLabel = options.homeVolume ?? options.homeRoot;
     this.idleTimeoutMs = options.idleTimeoutMs;
     this.logger = options.logger ?? (() => {});
     this.maxRunningContainers = options.maxRunningContainers;
     this.now = options.now ?? Date.now;
     this.pid = options.pid ?? process.pid;
+    this.previewSessionId = options.previewSessionId ?? null;
     this.pullPolicy = options.pullPolicy;
     this.startTimeoutMs = options.startTimeoutMs;
     this.workspaces = new LocalPreviewWorkspaces({
@@ -331,15 +368,28 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       urlPrefix: options.urlPrefix,
     });
 
-    this.idleSweepTimer = setInterval(
-      () => void this.sweepIdle(),
-      options.idleSweepIntervalMs ?? 60_000,
-    );
-    this.idleSweepTimer.unref();
+    this.idleSweepTimer =
+      owner == null
+        ? setInterval(() => void this.sweepIdle(), options.idleSweepIntervalMs ?? 60_000)
+        : null;
+    this.idleSweepTimer?.unref();
   }
 
   ensureWorkspace(spec: PreviewWorkspaceSpec) {
     return this.workspaces.ensureWorkspace(spec);
+  }
+
+  getWorkspace(id: string) {
+    const entry = this.workspaces.get(id);
+    return entry == null ? null : { ...entry };
+  }
+
+  workspaceUrl(id: string) {
+    return this.workspaces.workspaceUrl(id);
+  }
+
+  containerUrl(id: string) {
+    return this.workspaces.containerUrl(id);
   }
 
   async collectGradedFiles({ qid, variantSeed }: { qid: string; variantSeed: string }) {
@@ -368,7 +418,8 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
     const launch = this.workspaces.beginLaunch(id);
     if (launch == null) return this.pendingLaunches.get(id) ?? Promise.resolve();
 
-    const launchPromise = this.runLaunch(id, launch.generation)
+    const runLaunch = () => this.runLaunch(id, launch.generation);
+    const launchPromise = (this.owner?.scheduleLaunch(runLaunch) ?? runLaunch())
       .catch(async (err) => {
         this.logger(`Workspace ${id} failed to launch: ${errorMessage(err)}`);
         const applied = this.workspaces.transition(id, launch.generation, {
@@ -429,7 +480,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
         // The pid label is the preview server's in-container pid (1), which is alive
         // in every fresh preview container, so the pid fallback can't reap volume-mode
         // orphans — the identity match must key on the same value set at launch.
-        ownHomeRoot: this.homeVolume ?? this.homeRoot,
+        ownHomeRoot: this.homeRootLabel,
       });
       if (!prune) continue;
 
@@ -443,7 +494,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    clearInterval(this.idleSweepTimer);
+    if (this.idleSweepTimer != null) clearInterval(this.idleSweepTimer);
 
     // Invalidating every launch generation first makes in-flight launches
     // abort at their next checkpoint instead of running to completion.
@@ -457,11 +508,23 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       }),
     );
     await Promise.all(this.pendingLaunches.values());
+    if (this.previewSessionId != null) {
+      await fs.rm(this.homeRoot, { force: true, recursive: true });
+    }
+    this.owner?.removeSession(this);
   }
 
-  private async stopWorkspace(id: string, message: string) {
+  async stopWorkspace(id: string, message: string) {
     this.workspaces.forceState(id, { message, state: 'stopped' });
     await this.teardownContainer(id);
+  }
+
+  leastRecentlyActiveRunning() {
+    return this.workspaces.leastRecentlyActiveRunning();
+  }
+
+  runningCount() {
+    return this.workspaces.list().filter((entry) => entry.state === 'running').length;
   }
 
   /**
@@ -483,7 +546,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
 
   private async runLaunch(id: string, generation: number) {
     const entry = this.workspaces.get(id);
-    if (entry == null) return;
+    if (entry?.launchGeneration !== generation) return;
     const { spec, version } = entry;
     const step = (message: string) => this.workspaces.transition(id, generation, { message });
 
@@ -496,6 +559,8 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       });
       return;
     }
+
+    if (this.workspaces.get(id)?.launchGeneration !== generation) return;
 
     await this.makeRoomForContainer();
 
@@ -523,7 +588,11 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
 
     if (!step('Creating container')) return;
     const network = this.containerNetwork;
-    const alias = `pl-workspace-${id}-${version}`;
+    const sessionNamespace =
+      this.previewSessionId == null
+        ? ''
+        : `${createHash('sha256').update(this.previewSessionId).digest('hex').slice(0, 12)}-`;
+    const alias = `pl-workspace-${sessionNamespace}${id}-${version}`;
 
     const hostConfig: PreviewWorkspaceContainerCreateOptions['HostConfig'] = {
       NetworkMode: network ?? 'bridge',
@@ -537,7 +606,7 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
           Type: 'volume',
           Source: this.homeVolume,
           Target: containerHome,
-          VolumeOptions: { Subpath: path.relative(this.homeRoot, homeDir) },
+          VolumeOptions: { Subpath: path.relative(this.homeSubpathRoot, homeDir) },
         },
       ];
     } else {
@@ -563,10 +632,13 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
       Image: spec.settings.image,
       Labels: {
         [PREVIEW_WORKSPACE_CONTAINER_LABEL]: 'true',
-        [PREVIEW_WORKSPACE_HOME_ROOT_LABEL]: this.homeVolume ?? this.homeRoot,
+        [PREVIEW_WORKSPACE_HOME_ROOT_LABEL]: this.homeRootLabel,
         [PREVIEW_WORKSPACE_ID_LABEL]: id,
         [PREVIEW_WORKSPACE_PID_LABEL]: String(this.pid),
         [PREVIEW_WORKSPACE_VERSION_LABEL]: String(version),
+        ...(this.previewSessionId == null
+          ? {}
+          : { 'com.prairielearn.preview-workspace.session-id': this.previewSessionId }),
       },
     };
     if (network != null) {
@@ -683,6 +755,10 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   }
 
   private async makeRoomForContainer() {
+    if (this.owner != null) {
+      await this.owner.makeRoomForContainer();
+      return;
+    }
     while (
       this.workspaces.list().filter((entry) => entry.state === 'running').length >=
       this.maxRunningContainers
@@ -718,8 +794,118 @@ class PreviewWorkspaceManagerImpl implements PreviewWorkspaceManager {
   }
 }
 
+class PreviewWorkspaceOwnerImpl implements PreviewWorkspaceOwner {
+  private closed = false;
+  private readonly idleSweepTimer: NodeJS.Timeout;
+  private launchQueue = Promise.resolve();
+  private readonly options: PreviewWorkspaceOwnerOptions;
+  private readonly sessions = new Set<PreviewWorkspaceManagerImpl>();
+
+  constructor(options: PreviewWorkspaceOwnerOptions) {
+    this.options = {
+      ...options,
+      docker: options.docker ?? (new Docker() as unknown as PreviewWorkspaceDockerClient),
+    };
+    this.idleSweepTimer = setInterval(
+      () => void this.sweepIdle(),
+      options.idleSweepIntervalMs ?? 60_000,
+    );
+    this.idleSweepTimer.unref();
+  }
+
+  createSession(options: PreviewWorkspaceSessionOptions): PreviewWorkspaceManager {
+    if (this.closed) throw new Error('Preview Workspace owner is closed.');
+    const session = new PreviewWorkspaceManagerImpl(
+      {
+        ...this.options,
+        courseDir: options.courseDir,
+        previewSessionId: options.previewSessionId,
+        urlPrefix: options.urlPrefix,
+      },
+      this,
+    );
+    this.sessions.add(session);
+    return session;
+  }
+
+  async makeRoomForContainer() {
+    while (this.runningCount() >= this.options.maxRunningContainers) {
+      let victim: { entry: PreviewWorkspaceEntry; session: PreviewWorkspaceManagerImpl } | null =
+        null;
+      for (const session of this.sessions) {
+        const entry = session.leastRecentlyActiveRunning();
+        if (entry == null) continue;
+        if (victim == null || entry.lastActivityAt < victim.entry.lastActivityAt) {
+          victim = { entry, session };
+        }
+      }
+      if (victim == null) return;
+      await victim.session.stopWorkspace(
+        victim.entry.id,
+        'Workspace stopped to make room for another workspace.',
+      );
+    }
+  }
+
+  scheduleLaunch(launch: () => Promise<void>): Promise<void> {
+    const scheduled = this.launchQueue.then(launch, launch);
+    this.launchQueue = scheduled.catch(() => {});
+    return scheduled;
+  }
+
+  async pruneOrphans(): Promise<string[]> {
+    const containers = await this.options.docker!.listContainers({
+      all: true,
+      filters: { label: [`${PREVIEW_WORKSPACE_CONTAINER_LABEL}=true`] },
+    });
+    const removedIds: string[] = [];
+    for (const containerInfo of containers) {
+      if (
+        !shouldPruneContainer(containerInfo.Labels, {
+          isPidAlive: isProcessAlive,
+          ownHomeRoot: this.options.homeVolume ?? this.options.homeRoot,
+        })
+      ) {
+        continue;
+      }
+      await this.options.docker!.getContainer(containerInfo.Id).remove({ force: true });
+      removedIds.push(containerInfo.Id);
+    }
+    return removedIds;
+  }
+
+  async sweepIdle() {
+    await Promise.all([...this.sessions].map((session) => session.sweepIdle()));
+  }
+
+  removeSession(session: PreviewWorkspaceManagerImpl) {
+    this.sessions.delete(session);
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    clearInterval(this.idleSweepTimer);
+    await Promise.all([...this.sessions].map((session) => session.close()));
+  }
+
+  private runningCount() {
+    let count = 0;
+    for (const session of this.sessions) {
+      count += session.runningCount();
+    }
+    return count;
+  }
+}
+
 export function createPreviewWorkspaceManager(
   options: PreviewWorkspaceManagerOptions,
 ): PreviewWorkspaceManager {
   return new PreviewWorkspaceManagerImpl(options);
+}
+
+export function createPreviewWorkspaceOwner(
+  options: PreviewWorkspaceOwnerOptions,
+): PreviewWorkspaceOwner {
+  return new PreviewWorkspaceOwnerImpl(options);
 }

@@ -15,6 +15,7 @@ export interface PreviewWorkspaceProxyTargets {
 }
 
 export interface PreviewWorkspaceProxy {
+  close(): void;
   middleware: RequestHandler;
   upgrade: (req: http.IncomingMessage, socket: Duplex, head: Buffer) => void;
 }
@@ -108,6 +109,7 @@ export function makePreviewWorkspaceProxy({
   logger?: (message: string) => void;
   targets: PreviewWorkspaceProxyTargets;
 }): PreviewWorkspaceProxy {
+  const sockets = new Set<Duplex>();
   const proxyMiddleware = createProxyMiddleware<
     http.IncomingMessage & { originalUrl?: string },
     http.ServerResponse
@@ -177,10 +179,19 @@ export function makePreviewWorkspaceProxy({
   const upgrade: PreviewWorkspaceProxy['upgrade'] = (req, socket, head) => {
     const match = matchContainerPath(req);
     if (match != null) targets.heartbeat(match.workspaceId);
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
     // The upgrade event's socket is typed as a Duplex, but it is always a
     // net.Socket at runtime, which is what the proxy middleware expects.
     proxyMiddleware.upgrade(req, socket as Socket, head);
   };
 
-  return { middleware, upgrade };
+  return {
+    close() {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+    },
+    middleware,
+    upgrade,
+  };
 }

@@ -72,8 +72,9 @@ import {
 import type { LocalPreviewSubmissionFiles } from './submission-files.js';
 import {
   type PreviewWorkspaceManager,
-  type PreviewWorkspaceManagerOptions,
-  createPreviewWorkspaceManager,
+  type PreviewWorkspaceOwner,
+  type PreviewWorkspaceOwnerOptions,
+  createPreviewWorkspaceOwner,
 } from './workspace-launcher.js';
 import {
   makePreviewWorkspaceStatusJson,
@@ -85,16 +86,15 @@ import type { PreviewWorkspaceEntry } from './workspace-registry.js';
 
 export { parseQuestionPreviewServerOptions };
 
-type PreviewWorkspaceManagerFactory = (
-  options: PreviewWorkspaceManagerOptions,
-) => PreviewWorkspaceManager;
+type PreviewWorkspaceOwnerFactory = (
+  options: PreviewWorkspaceOwnerOptions,
+) => PreviewWorkspaceOwner;
 
 export interface StartedQuestionPreviewServer {
   close(): Promise<void>;
   options: QuestionPreviewServerOptions;
   server: Server;
   startupSessions: LocalPreviewSessionDescriptor[];
-  workspaceManager: PreviewWorkspaceManager | null;
 }
 
 const PRAIRIELEARN_VERSION = (
@@ -379,10 +379,10 @@ function makePreviewWorkspacePageUrls(
   workspaceManager: PreviewWorkspaceManager,
   entry: PreviewWorkspaceEntry,
 ) {
-  const workspaceUrl = workspaceManager.workspaces.workspaceUrl(entry.id);
+  const workspaceUrl = workspaceManager.workspaceUrl(entry.id);
 
   return {
-    containerUrl: workspaceManager.workspaces.containerUrl(entry.id),
+    containerUrl: workspaceManager.containerUrl(entry.id),
     statusUrl: `${workspaceUrl}/status`,
   };
 }
@@ -398,7 +398,7 @@ function registerQuestionPreviewWorkspaceRoutes(
         mapQuestionPreviewWorkspacePageResponse({
           html: renderPreviewWorkspaceUnavailableHtml({
             reason:
-              'Workspaces are disabled on this preview server. Restart it without --no-workspaces to launch workspaces.',
+              'Workspaces are disabled on this preview server. Restart it with --workspaces to launch workspaces.',
           }),
           status: 404,
         }),
@@ -410,7 +410,7 @@ function registerQuestionPreviewWorkspaceRoutes(
   app.get(
     '/workspace/:workspaceId',
     asyncHandler(async (req, res) => {
-      const entry = workspaceManager.workspaces.get(req.params.workspaceId);
+      const entry = workspaceManager.getWorkspace(req.params.workspaceId);
       if (entry == null) {
         await sendQuestionPreviewHttpAction(
           res,
@@ -446,7 +446,7 @@ function registerQuestionPreviewWorkspaceRoutes(
     app.post(
       `/workspace/:workspaceId/${action}`,
       asyncHandler(async (req, res) => {
-        const entry = workspaceManager.workspaces.get(req.params.workspaceId);
+        const entry = workspaceManager.getWorkspace(req.params.workspaceId);
         if (entry == null) {
           await sendQuestionPreviewHttpAction(res, mapQuestionPreviewWorkspaceStatusResponse(null));
           return;
@@ -462,12 +462,15 @@ function registerQuestionPreviewWorkspaceRoutes(
         // next page load triggers a launch.
         void workspaceManager.requestLaunch(entry.id);
 
+        const updatedEntry = workspaceManager.getWorkspace(entry.id);
         await sendQuestionPreviewHttpAction(
           res,
           mapQuestionPreviewWorkspaceStatusResponse(
-            makePreviewWorkspaceStatusJson(entry, {
-              containerUrl: workspaceManager.workspaces.containerUrl(entry.id),
-            }),
+            updatedEntry == null
+              ? null
+              : makePreviewWorkspaceStatusJson(updatedEntry, {
+                  containerUrl: workspaceManager.containerUrl(updatedEntry.id),
+                }),
           ),
         );
       }),
@@ -477,7 +480,7 @@ function registerQuestionPreviewWorkspaceRoutes(
   app.get(
     '/workspace/:workspaceId/status',
     asyncHandler(async (req, res) => {
-      const entry = workspaceManager.workspaces.get(req.params.workspaceId);
+      const entry = workspaceManager.getWorkspace(req.params.workspaceId);
       if (entry == null) {
         await sendQuestionPreviewHttpAction(res, mapQuestionPreviewWorkspaceStatusResponse(null));
         return;
@@ -488,7 +491,7 @@ function registerQuestionPreviewWorkspaceRoutes(
         res,
         mapQuestionPreviewWorkspaceStatusResponse(
           makePreviewWorkspaceStatusJson(entry, {
-            containerUrl: workspaceManager.workspaces.containerUrl(entry.id),
+            containerUrl: workspaceManager.containerUrl(entry.id),
           }),
         ),
       );
@@ -549,6 +552,7 @@ function createQuestionPreviewApp({
   let workspaceUpgradeHandler:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | null = null;
+  let closeWorkspaceProxy = () => {};
   if (workspaceManager != null) {
     const workspaceProxy = makePreviewWorkspaceProxy({
       logger: (message) => console.error(message),
@@ -556,6 +560,7 @@ function createQuestionPreviewApp({
     });
     app.use(workspaceProxy.middleware);
     workspaceUpgradeHandler = workspaceProxy.upgrade;
+    closeWorkspaceProxy = () => workspaceProxy.close();
   }
   registerQuestionPreviewWorkspaceRoutes(app, workspaceManager);
 
@@ -620,14 +625,14 @@ function createQuestionPreviewApp({
 
   app.use(questionPreviewErrorHandler());
 
-  return { app, workspaceUpgradeHandler };
+  return { app, closeWorkspaceProxy, workspaceUpgradeHandler };
 }
 
 interface StartQuestionPreviewServerParams {
   argv: string[];
   createEngine?: typeof createQuestionPreviewEngine;
   createRuntime?: QuestionPreviewRuntimeFactory;
-  createWorkspaceManager?: PreviewWorkspaceManagerFactory;
+  createWorkspaceOwner?: PreviewWorkspaceOwnerFactory;
   localPreviewGeneratedFilesMax?: number;
   startupLogger?: QuestionPreviewStartupLogger;
 }
@@ -640,7 +645,7 @@ export async function startQuestionPreviewServer({
   argv,
   createEngine = createQuestionPreviewEngine,
   createRuntime,
-  createWorkspaceManager = createPreviewWorkspaceManager,
+  createWorkspaceOwner = createPreviewWorkspaceOwner,
   localPreviewGeneratedFilesMax,
   startupLogger,
 }: StartQuestionPreviewServerParams): Promise<StartedQuestionPreviewServer> {
@@ -651,23 +656,27 @@ export async function startQuestionPreviewServer({
   const workspaceOptions = getQuestionPreviewServerWorkspaceOptions(options);
   let engine: QuestionPreviewEngineLifecycle | null = null;
   let server: Server | null = null;
-  const workspaceManagers: PreviewWorkspaceManager[] = [];
+  let workspaceHomeRootToRemove: string | null = null;
+  let workspaceOwner: PreviewWorkspaceOwner | null = null;
 
-  const catalog = new LocalPreviewSessionCatalog(async (previewSessionId, courseDir) => {
-    const courseSource = await createLocalPreviewCourseSource(courseDir);
-    const sessionPrefix = `/preview-sessions/${previewSessionId}`;
-    let workspaceManager: PreviewWorkspaceManager | null = null;
-    let workspaceHomeRootToRemove: string | null = null;
+  if (createRuntime == null) {
+    startupLogger?.('Initializing shared PrairieLearn preview engine.');
+    engine = await createEngine({
+      ...runtimeOptions,
+      prewarmWorkers: true,
+      ...(startupLogger == null ? {} : { startupLogger }),
+    });
+  }
 
+  try {
     if (workspaceOptions.workspacesEnabled) {
       const homeRoot =
         workspaceOptions.workspaceHomeDir ??
         (workspaceHomeRootToRemove = await fs.mkdtemp(
-          path.join(os.tmpdir(), `pl-preview-workspaces-${previewSessionId}-`),
+          path.join(os.tmpdir(), 'pl-preview-workspaces-'),
         ));
-      workspaceManager = createWorkspaceManager({
+      workspaceOwner = createWorkspaceOwner({
         containerNetwork: workspaceOptions.workspaceNetwork,
-        courseDir: courseSource.courseDir,
         homeRoot,
         homeVolume: workspaceOptions.workspaceHomeVolume,
         idleTimeoutMs: workspaceOptions.workspaceIdleTimeoutMs,
@@ -675,17 +684,33 @@ export async function startQuestionPreviewServer({
         maxRunningContainers: workspaceOptions.workspaceMaxContainers,
         pullPolicy: workspaceOptions.workspacePullPolicy,
         startTimeoutMs: workspaceOptions.workspaceStartTimeoutMs,
-        urlPrefix: sessionPrefix,
       });
-      workspaceManagers.push(workspaceManager);
       try {
-        await workspaceManager.pruneOrphans();
+        await workspaceOwner.pruneOrphans();
       } catch (err) {
         startupLogger?.(
           `Skipping workspace orphan pruning: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
+  } catch (err) {
+    await workspaceOwner?.close().catch(() => {});
+    if (workspaceHomeRootToRemove != null) {
+      await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch(() => {});
+    }
+    await engine?.close().catch(() => {});
+    throw err;
+  }
+
+  const catalog = new LocalPreviewSessionCatalog(async (previewSessionId, courseDir) => {
+    const courseSource = await createLocalPreviewCourseSource(courseDir);
+    const sessionPrefix = `/preview-sessions/${previewSessionId}`;
+    const workspaceManager =
+      workspaceOwner?.createSession({
+        courseDir: courseSource.courseDir,
+        previewSessionId,
+        urlPrefix: sessionPrefix,
+      }) ?? null;
 
     let runtime: QuestionPreviewRuntimeLifecycle;
     try {
@@ -713,13 +738,10 @@ export async function startQuestionPreviewServer({
             });
     } catch (err) {
       await workspaceManager?.close().catch(() => {});
-      if (workspaceHomeRootToRemove != null) {
-        await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch(() => {});
-      }
       throw err;
     }
 
-    const { app } = createQuestionPreviewApp({
+    const { app, closeWorkspaceProxy, workspaceUpgradeHandler } = createQuestionPreviewApp({
       courseSource,
       httpOptions,
       localPreviewGeneratedFiles: runtime.localPreviewGeneratedFiles,
@@ -731,17 +753,14 @@ export async function startQuestionPreviewServer({
     });
 
     return {
+      beginClose: closeWorkspaceProxy,
       async close() {
         let closeError: unknown;
+        closeWorkspaceProxy();
         try {
           await workspaceManager?.close();
         } catch (err) {
           closeError = err;
-        }
-        if (workspaceHomeRootToRemove != null) {
-          await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch((err) => {
-            closeError ??= err;
-          });
         }
         await runtime.close().catch((err) => {
           closeError ??= err;
@@ -750,17 +769,9 @@ export async function startQuestionPreviewServer({
       },
       courseDir: courseSource.courseDir,
       handle: app,
+      handleUpgrade: workspaceUpgradeHandler ?? undefined,
     };
   }, options.questionTimeoutMilliseconds);
-
-  if (createRuntime == null) {
-    startupLogger?.('Initializing shared PrairieLearn preview engine.');
-    engine = await createEngine({
-      ...runtimeOptions,
-      prewarmWorkers: true,
-      ...(startupLogger == null ? {} : { startupLogger }),
-    });
-  }
 
   const controlPlaneError = (
     res: Response,
@@ -789,8 +800,10 @@ export async function startQuestionPreviewServer({
     next();
   };
 
+  const isCanonicalSessionId = (previewSessionId: string) =>
+    /^pvs_[A-Za-z0-9_-]{22}$/.test(previewSessionId);
   const hasCanonicalSessionId = (req: Request, previewSessionId: string) =>
-    /^pvs_[A-Za-z0-9_-]{22}$/.test(previewSessionId) &&
+    isCanonicalSessionId(previewSessionId) &&
     rawOriginalRequestPathname(req).split('/')[2] === previewSessionId;
 
   const app = express();
@@ -940,18 +953,48 @@ export async function startQuestionPreviewServer({
 
     startupLogger?.(`Starting HTTP server on ${httpOptions.host}:${httpOptions.port}.`);
     server = app.listen(httpOptions.port, httpOptions.host);
+    server.on('upgrade', (req, socket, head) => {
+      const previewSessionId = rawRequestPathname(req).split('/')[2] ?? '';
+      if (!isCanonicalSessionId(previewSessionId)) {
+        socket.destroy();
+        return;
+      }
+      const lease = catalog.acquire(previewSessionId);
+      if (lease == null) {
+        socket.destroy();
+        return;
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        lease.release();
+      };
+      socket.once('close', release);
+      socket.once('error', release);
+      lease.handleUpgrade(req, socket, head);
+    });
     await waitForListening(server);
     return {
       async close() {
         let closeError: unknown;
-        await new Promise<void>((resolve, reject) => {
+        const serverClosed = new Promise<void>((resolve, reject) => {
           server!.close((err) => (err ? reject(err) : resolve()));
-        }).catch((err) => {
-          closeError = err;
         });
         await catalog.close().catch((err) => {
           closeError ??= err;
         });
+        await serverClosed.catch((err) => {
+          closeError ??= err;
+        });
+        await workspaceOwner?.close().catch((err) => {
+          closeError ??= err;
+        });
+        if (workspaceHomeRootToRemove != null) {
+          await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch((err) => {
+            closeError ??= err;
+          });
+        }
         await engine?.close().catch((err) => {
           closeError ??= err;
         });
@@ -960,10 +1003,13 @@ export async function startQuestionPreviewServer({
       options,
       server,
       startupSessions,
-      workspaceManager: workspaceManagers[0] ?? null,
     };
   } catch (err) {
     await catalog.close().catch(() => {});
+    await workspaceOwner?.close().catch(() => {});
+    if (workspaceHomeRootToRemove != null) {
+      await fs.rm(workspaceHomeRootToRemove, { force: true, recursive: true }).catch(() => {});
+    }
     await engine?.close().catch(() => {});
     if (server != null) await new Promise<void>((resolve) => server!.close(() => resolve()));
     throw err;
