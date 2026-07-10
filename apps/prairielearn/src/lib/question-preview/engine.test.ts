@@ -22,7 +22,8 @@ function makeCourseSource(name: string): LocalPreviewCourseSource {
     readTemplateInfo: async () => {
       throw new Error('not used by the fake engine generation');
     },
-    resolveFile: async () => null,
+    resolveResource: async () => null,
+    sanitizeDiagnosticValue: (value) => value,
   };
 }
 
@@ -145,5 +146,37 @@ describe('question preview engine lifecycle', () => {
 
     await engine.close();
     assert.deepEqual(closedGenerationIds, [1, 2]);
+  });
+
+  it('counts a generation acquisition before shutdown can begin draining it', async () => {
+    let closeCalls = 0;
+    let releaseRender: (() => void) | undefined;
+    const renderReleased = new Promise<void>((resolve) => {
+      releaseRender = resolve;
+    });
+    const engine = await createQuestionPreviewEngineLifecycle({
+      createGeneration: async () => ({
+        close: async () => {
+          closeCalls++;
+        },
+        render: async () => {
+          await renderReleased;
+          return success('finished');
+        },
+      }),
+    });
+    const renderer = engine.createCourseRenderer(makeRendererOptions(makeCourseSource('course')));
+    const qidResult = parseQuestionPreviewQid('demo/question');
+    if (!qidResult.ok) throw new Error(qidResult.error.message);
+
+    const render = renderer.render({ qid: qidResult.qid });
+    const close = engine.close();
+    await Promise.resolve();
+    assert.equal(closeCalls, 0);
+
+    releaseRender?.();
+    assert.equal((await render).documentHtml, 'finished');
+    await close;
+    assert.equal(closeCalls, 1);
   });
 });

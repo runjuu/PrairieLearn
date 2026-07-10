@@ -74,11 +74,10 @@ function validateQuestionPreviewWorkersExecutionMode(
   }
 }
 
-async function initPrairieLearnForQuestionPreview({
+async function initPrairieLearnGlobalsForQuestionPreview({
   cacheType = 'none',
   devMode = false,
   mode,
-  prewarmWorkers = false,
   questionTimeoutMilliseconds = 5000,
   startupLogger,
   workersCount = 1,
@@ -86,7 +85,6 @@ async function initPrairieLearnForQuestionPreview({
   cacheType?: QuestionPreviewCacheType;
   devMode?: boolean;
   mode: QuestionPreviewWorkersExecutionMode;
-  prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
   startupLogger?: QuestionPreviewStartupLogger;
   workersCount?: number;
@@ -114,22 +112,35 @@ async function initPrairieLearnForQuestionPreview({
 
   startupLogger?.('Loading PrairieLearn elements.');
   await freeformServer.init();
-
-  startupLogger?.(
-    prewarmWorkers
-      ? `Starting ${workersCount} Python worker${workersCount === 1 ? '' : 's'} (${mode} mode).`
-      : `Preparing Python worker pool (${mode} mode, workers start on first request).`,
-  );
-  await codeCaller.init({ lazyWorkers: !prewarmWorkers });
-
-  startupLogger?.('PrairieLearn runtime initialized.');
 }
 
-async function closePrairieLearnForQuestionPreview() {
-  await codeCaller.finish();
+async function closePrairieLearnGlobalsForQuestionPreview() {
   await assets.close();
   await cache.close();
   load.close();
+}
+
+class ProcessOwnedQuestionPreviewEngine implements QuestionPreviewEngineLifecycle {
+  private closePromise: Promise<void> | null = null;
+
+  constructor(private readonly workerLifecycle: QuestionPreviewEngineLifecycle) {}
+
+  createCourseRenderer(
+    options: Parameters<QuestionPreviewEngineLifecycle['createCourseRenderer']>[0],
+  ) {
+    return this.workerLifecycle.createCourseRenderer(options);
+  }
+
+  async close() {
+    this.closePromise ??= (async () => {
+      try {
+        await this.workerLifecycle.close();
+      } finally {
+        await closePrairieLearnGlobalsForQuestionPreview();
+      }
+    })();
+    return this.closePromise;
+  }
 }
 
 class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
@@ -172,25 +183,37 @@ export async function createQuestionPreviewEngine({
   workersExecutionMode = 'container',
 }: QuestionPreviewEngineStartupOptions): Promise<QuestionPreviewEngineLifecycle> {
   validateQuestionPreviewWorkersExecutionMode(workersExecutionMode);
-
-  return createQuestionPreviewEngineLifecycle({
-    createGeneration: async () => {
-      await initPrairieLearnForQuestionPreview({
-        cacheType,
-        devMode,
-        mode: workersExecutionMode,
-        prewarmWorkers,
-        questionTimeoutMilliseconds,
-        startupLogger,
-        workersCount,
-      });
-
-      return {
-        close: closePrairieLearnForQuestionPreview,
-        render: (options, input) => createQuestionPreviewDocumentRenderer(options).render(input),
-      };
-    },
+  await initPrairieLearnGlobalsForQuestionPreview({
+    cacheType,
+    devMode,
+    mode: workersExecutionMode,
+    questionTimeoutMilliseconds,
+    startupLogger,
+    workersCount,
   });
+
+  try {
+    const workerLifecycle = await createQuestionPreviewEngineLifecycle({
+      createGeneration: async () => {
+        startupLogger?.(
+          prewarmWorkers
+            ? `Starting ${workersCount} Python worker${workersCount === 1 ? '' : 's'} (${workersExecutionMode} mode).`
+            : `Preparing Python worker pool (${workersExecutionMode} mode, workers start on first request).`,
+        );
+        await codeCaller.init({ lazyWorkers: !prewarmWorkers });
+
+        return {
+          close: () => codeCaller.finish(),
+          render: (options, input) => createQuestionPreviewDocumentRenderer(options).render(input),
+        };
+      },
+    });
+    startupLogger?.('PrairieLearn runtime initialized.');
+    return new ProcessOwnedQuestionPreviewEngine(workerLifecycle);
+  } catch (err) {
+    await closePrairieLearnGlobalsForQuestionPreview();
+    throw err;
+  }
 }
 
 export async function createQuestionPreviewRuntime({

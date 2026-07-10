@@ -15,7 +15,11 @@ import * as load from '../load.js';
 
 import { CodeCallerContainer, init as initCodeCallerDocker } from './code-caller-container.js';
 import { CodeCallerNative } from './code-caller-native.js';
-import { type CodeCaller, FunctionMissingError } from './code-caller-shared.js';
+import {
+  type CodeCaller,
+  CodeCallerPoolUnavailableError,
+  FunctionMissingError,
+} from './code-caller-shared.js';
 import { getPythonPath } from './python-path.js';
 
 const debug = debugfn('prairielearn:code-caller');
@@ -160,7 +164,7 @@ export async function withCodeCaller<T>(
   }
 
   if (!pool) {
-    throw new Error('CodeCaller pool not initialized');
+    throw new CodeCallerPoolUnavailableError('CodeCaller pool not initialized');
   }
 
   if (pool.available === 0 && !config.workerUseQueue) {
@@ -241,4 +245,4 @@ export async function withCodeCaller<T>(
   }
 }
 
-export { FunctionMissingError, type CodeCaller };
+export { CodeCallerPoolUnavailableError, FunctionMissingError, type CodeCaller };

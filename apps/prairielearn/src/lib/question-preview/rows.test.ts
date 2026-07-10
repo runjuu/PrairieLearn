@@ -33,7 +33,8 @@ describe('local preview rows', () => {
       readTemplateInfo: async () => {
         throw new Error('not used by this row test');
       },
-      resolveFile: async () => null,
+      resolveResource: async () => null,
+      sanitizeDiagnosticValue: (value) => value,
     };
     const { caller, course, question } = makeLocalPreviewQuestionRows({
       courseSource,
