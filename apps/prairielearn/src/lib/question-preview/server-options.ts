@@ -40,6 +40,7 @@ const SUPPORTED_FLAGS = new Set([
 export interface QuestionPreviewServerHttpOptions {
   host: string;
   port: number;
+  questionTimeoutMilliseconds: number;
   renderMode: QuestionPreviewRenderMode;
 }
 
@@ -296,6 +297,7 @@ export function getQuestionPreviewServerHttpOptions(
   return {
     host: options.host,
     port: options.port,
+    questionTimeoutMilliseconds: options.questionTimeoutMilliseconds,
     renderMode: options.renderMode,
   };
 }

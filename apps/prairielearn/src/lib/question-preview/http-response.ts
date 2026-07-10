@@ -150,6 +150,24 @@ export function mapQuestionPreviewGradingDisabledResponse(): QuestionPreviewHttp
   ]);
 }
 
+export function mapQuestionPreviewTimeoutResponse(
+  questionTimeoutMilliseconds: number,
+): QuestionPreviewHttpAction {
+  return action(
+    {
+      html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+      kind: 'html',
+      status: 504,
+    },
+    [
+      {
+        details: { questionTimeoutMilliseconds },
+        message: 'Question preview request timed out:',
+      },
+    ],
+  );
+}
+
 export function mapQuestionPreviewDocumentResponse(
   result: QuestionPreviewDocumentResult,
 ): QuestionPreviewHttpAction {
