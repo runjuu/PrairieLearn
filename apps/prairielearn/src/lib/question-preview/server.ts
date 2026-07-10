@@ -17,6 +17,7 @@ import * as assets from '../assets.js';
 import { guessMimeType } from '../mime-type.js';
 
 import { createQuestionPreviewAssetResolver } from './assets.js';
+import { type LocalPreviewCourseSource, createLocalPreviewCourseSource } from './course-source.js';
 import type { QuestionPreviewRenderMode } from './document.js';
 import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import {
@@ -449,6 +450,7 @@ function questionPreviewErrorHandler(): ErrorRequestHandler {
 }
 
 interface CreateQuestionPreviewAppParams {
+  courseSource: LocalPreviewCourseSource;
   httpOptions: QuestionPreviewServerHttpOptions;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
@@ -463,6 +465,7 @@ interface CreateQuestionPreviewAppParams {
  * tunnels workspace websocket traffic.
  */
 function createQuestionPreviewApp({
+  courseSource,
   httpOptions,
   localPreviewGeneratedFiles,
   localPreviewSubmissionFiles,
@@ -472,7 +475,7 @@ function createQuestionPreviewApp({
 }: CreateQuestionPreviewAppParams) {
   const app = express();
   const assetResolver = createQuestionPreviewAssetResolver({
-    courseDir: httpOptions.courseDir,
+    courseSource,
     localPreviewGeneratedFiles,
     urlPrefix,
   });
@@ -581,7 +584,9 @@ export async function startQuestionPreviewServer({
   startupLogger,
 }: StartQuestionPreviewServerParams): Promise<StartedQuestionPreviewServer> {
   startupLogger?.('Reading preview server options.');
-  const options = await parseQuestionPreviewServerOptions(argv);
+  const parsedOptions = await parseQuestionPreviewServerOptions(argv);
+  const courseSource = await createLocalPreviewCourseSource(parsedOptions.courseDir);
+  const options = { ...parsedOptions, courseDir: courseSource.courseDir };
   startupLogger?.(`Validated course directory: ${options.courseDir}.`);
 
   const httpOptions = getQuestionPreviewServerHttpOptions(options);
@@ -610,7 +615,7 @@ export async function startQuestionPreviewServer({
         ));
       workspaceManager = createWorkspaceManager({
         containerNetwork: workspaceOptions.workspaceNetwork,
-        courseDir: options.courseDir,
+        courseDir: courseSource.courseDir,
         homeRoot,
         homeVolume: workspaceOptions.workspaceHomeVolume,
         idleTimeoutMs: workspaceOptions.workspaceIdleTimeoutMs,
@@ -639,14 +644,18 @@ export async function startQuestionPreviewServer({
       createRuntime,
       localPreviewGeneratedFilesMax,
       localPreviewWorkspaces: workspaceManager,
-      runtimeOptions: startupLogger == null ? runtimeOptions : { ...runtimeOptions, startupLogger },
+      runtimeOptions: {
+        ...runtimeOptions,
+        courseSource,
+        ...(startupLogger == null ? {} : { startupLogger }),
+      },
     });
 
     startupLogger?.('Preparing preview asset routes.');
-    await assets.init();
 
     startupLogger?.(`Starting HTTP server on ${httpOptions.host}:${httpOptions.port}.`);
     const { app, workspaceUpgradeHandler } = createQuestionPreviewApp({
+      courseSource,
       httpOptions,
       localPreviewGeneratedFiles: runtime.localPreviewGeneratedFiles,
       localPreviewSubmissionFiles: runtime.localPreviewSubmissionFiles,
