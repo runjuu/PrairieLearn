@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 
 import type { NextFunction, Request, Response } from 'express';
 
@@ -8,9 +10,11 @@ export interface LocalPreviewSessionDescriptor {
 }
 
 export interface LocalPreviewSessionOwnedState {
+  beginClose?(): Promise<void> | void;
   close(): Promise<void>;
   courseDir: string;
   handle(req: Request, res: Response, next: NextFunction): void;
+  handleUpgrade?(req: IncomingMessage, socket: Duplex, head: Buffer): void;
 }
 
 export type LocalPreviewSessionFactory = (
@@ -20,6 +24,7 @@ export type LocalPreviewSessionFactory = (
 
 export interface LocalPreviewSessionLease {
   handle(req: Request, res: Response, next: NextFunction): void;
+  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
   release(): void;
 }
 
@@ -41,6 +46,13 @@ class LocalPreviewSession {
     let released = false;
     return {
       handle: (req, res, next) => this.owned.handle(req, res, next),
+      handleUpgrade: (req, socket, head) => {
+        if (this.owned.handleUpgrade == null) {
+          socket.destroy();
+          return;
+        }
+        this.owned.handleUpgrade(req, socket, head);
+      },
       release: () => {
         if (released) return;
         released = true;
@@ -53,6 +65,7 @@ class LocalPreviewSession {
   async close() {
     if (!this.closing) {
       this.closing = true;
+      await this.owned.beginClose?.();
       if (this.activeLeases > 0) {
         this.drained = new Promise<void>((resolve) => {
           this.resolveDrained = resolve;

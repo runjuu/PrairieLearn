@@ -8,9 +8,11 @@ import {
   type PreviewWorkspaceContainerCreateOptions,
   type PreviewWorkspaceContainerInfo,
   type PreviewWorkspaceDockerClient,
+  type PreviewWorkspaceManager,
   type PreviewWorkspaceManagerOptions,
   type PreviewWorkspacePullProgressEvent,
   createPreviewWorkspaceManager,
+  createPreviewWorkspaceOwner,
   createPullProgressTracker,
   resolveHomeAndPort,
   shouldPruneContainer,
@@ -305,7 +307,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    const entry = manager.workspaces.get(workspaceId);
+    const entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'running');
     assert.deepEqual(entry?.target, { host: '127.0.0.1', port: 40100 });
 
@@ -345,7 +347,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(workspaceId)?.state, 'running');
 
     const container = docker.containers[0];
     // In volume mode the container mounts the workspace subpath of the named
@@ -373,7 +375,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(workspaceId)?.state, 'running');
 
     const container = docker.containers[0];
     assert.equal(container.options.HostConfig.NetworkMode, 'pl-preview-net');
@@ -401,7 +403,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(workspaceId)?.state, 'running');
     assert.match(docker.containers[0].options.HostConfig.Binds?.[0] ?? '', /:\/home\/labeled$/);
     assert.property(docker.containers[0].options.HostConfig.PortBindings, '9000/tcp');
   });
@@ -418,7 +420,7 @@ describe('preview workspace manager', () => {
     await manager.requestLaunch(second.workspaceId);
 
     assert.equal(docker.pullCount, 1);
-    assert.equal(manager.workspaces.get(second.workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(second.workspaceId)?.state, 'running');
   });
 
   it('always pulls under the always pull policy', async () => {
@@ -437,7 +439,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    const entry = manager.workspaces.get(workspaceId);
+    const entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'failed');
     assert.match(entry?.message ?? '', /pull policy is "never"/);
     assert.equal(docker.pullCount, 0);
@@ -450,7 +452,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    const entry = manager.workspaces.get(workspaceId);
+    const entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'failed');
     assert.match(entry?.message ?? '', /Docker is not reachable/);
     assert.lengthOf(docker.containers, 0);
@@ -466,7 +468,7 @@ describe('preview workspace manager', () => {
 
     await manager.requestLaunch(workspaceId);
 
-    const entry = manager.workspaces.get(workspaceId);
+    const entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'failed');
     assert.match(entry?.message ?? '', /did not respond before the startup timeout/);
     assert.isTrue(docker.containers[0].removed);
@@ -477,16 +479,16 @@ describe('preview workspace manager', () => {
     const manager = makeManager({ idleTimeoutMs: 1_000, now: () => currentTime });
     const { workspaceId } = manager.ensureWorkspace(makeSpec());
     await manager.requestLaunch(workspaceId);
-    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(workspaceId)?.state, 'running');
 
     currentTime = 500;
     await manager.sweepIdle();
-    assert.equal(manager.workspaces.get(workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(workspaceId)?.state, 'running');
 
     currentTime = 5_000;
     await manager.sweepIdle();
 
-    const entry = manager.workspaces.get(workspaceId);
+    const entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'stopped');
     assert.match(entry?.message ?? '', /inactivity/);
     assert.isTrue(docker.containers[0].removed);
@@ -497,14 +499,14 @@ describe('preview workspace manager', () => {
     const manager = makeManager({ maxRunningContainers: 1, now: () => currentTime });
     const first = manager.ensureWorkspace(makeSpec({ variantSeed: '1' }));
     await manager.requestLaunch(first.workspaceId);
-    assert.equal(manager.workspaces.get(first.workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(first.workspaceId)?.state, 'running');
 
     currentTime = 1_000;
     const second = manager.ensureWorkspace(makeSpec({ variantSeed: '2' }));
     await manager.requestLaunch(second.workspaceId);
 
-    assert.equal(manager.workspaces.get(first.workspaceId)?.state, 'stopped');
-    assert.equal(manager.workspaces.get(second.workspaceId)?.state, 'running');
+    assert.equal(manager.getWorkspace(first.workspaceId)?.state, 'stopped');
+    assert.equal(manager.getWorkspace(second.workspaceId)?.state, 'running');
     assert.isTrue(docker.containers[0].removed);
   });
 
@@ -519,7 +521,7 @@ describe('preview workspace manager', () => {
     await manager.reboot(workspaceId);
     await manager.requestLaunch(workspaceId);
 
-    const entry = manager.workspaces.get(workspaceId);
+    const entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'running');
     assert.equal(entry?.version, 1);
     assert.isTrue(docker.containers[0].removed);
@@ -537,7 +539,7 @@ describe('preview workspace manager', () => {
 
     await manager.reset(workspaceId);
 
-    let entry = manager.workspaces.get(workspaceId);
+    let entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'uninitialized');
     assert.equal(entry?.version, 2);
     assert.isTrue(docker.containers[0].removed);
@@ -549,7 +551,7 @@ describe('preview workspace manager', () => {
     );
 
     await manager.requestLaunch(workspaceId);
-    entry = manager.workspaces.get(workspaceId);
+    entry = manager.getWorkspace(workspaceId);
     assert.equal(entry?.state, 'running');
     const newHomeDir = path.join(tempDir, 'homes', `workspace-${workspaceId}-2`, 'current');
     assert.equal(
@@ -626,7 +628,228 @@ describe('preview workspace manager', () => {
     await manager.close();
 
     assert.isTrue(docker.containers.every((container) => container.removed));
-    assert.equal(manager.workspaces.get(first.workspaceId)?.state, 'stopped');
+    assert.equal(manager.getWorkspace(first.workspaceId)?.state, 'stopped');
     assert.isNull(manager.resolveContainerTarget(first.workspaceId));
+  });
+});
+
+describe('preview workspace owner', () => {
+  it('enforces one running-container limit across Local Preview Sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-workspace-owner-'));
+    const docker = new FakeDockerClient();
+    docker.images.set('workspace-image', {});
+    let currentTime = 0;
+    const owner = createPreviewWorkspaceOwner({
+      docker,
+      fetchFn: () => Promise.resolve(),
+      homeRoot: path.join(tempDir, 'homes'),
+      idleTimeoutMs: 60_000,
+      maxRunningContainers: 1,
+      now: () => currentTime,
+      pullPolicy: 'missing',
+      startTimeoutMs: 5_000,
+    });
+
+    try {
+      for (const course of ['first', 'second']) {
+        await fs.mkdir(path.join(tempDir, course, 'questions', 'demo/workspace', 'workspace'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(tempDir, course, 'questions', 'demo/workspace', 'workspace', 'starter.txt'),
+          'starter contents',
+        );
+      }
+      const firstSession = owner.createSession({
+        courseDir: path.join(tempDir, 'first'),
+        previewSessionId: 'pvs_first',
+        urlPrefix: '/preview-sessions/pvs_first',
+      });
+      const secondSession = owner.createSession({
+        courseDir: path.join(tempDir, 'second'),
+        previewSessionId: 'pvs_second',
+        urlPrefix: '/preview-sessions/pvs_second',
+      });
+      const first = firstSession.ensureWorkspace(makeSpec());
+      await firstSession.requestLaunch(first.workspaceId);
+
+      currentTime = 1_000;
+      const second = secondSession.ensureWorkspace(makeSpec());
+      await secondSession.requestLaunch(second.workspaceId);
+
+      assert.equal(firstSession.getWorkspace(first.workspaceId)?.state, 'stopped');
+      assert.equal(secondSession.getWorkspace(second.workspaceId)?.state, 'running');
+      assert.isTrue(docker.containers[0].removed);
+    } finally {
+      await owner.close();
+      await fs.rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('namespaces duplicate workspace identities by Local Preview Session', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-workspace-owner-'));
+    const docker = new FakeDockerClient();
+    docker.images.set('workspace-image', {});
+    const owner = createPreviewWorkspaceOwner({
+      containerNetwork: 'preview-network',
+      docker,
+      fetchFn: () => Promise.resolve(),
+      homeRoot: path.join(tempDir, 'homes'),
+      idleTimeoutMs: 60_000,
+      maxRunningContainers: 2,
+      pullPolicy: 'missing',
+      startTimeoutMs: 5_000,
+    });
+
+    try {
+      const sessions = [];
+      for (const name of ['first', 'second']) {
+        const courseDir = path.join(tempDir, name);
+        await fs.mkdir(path.join(courseDir, 'questions', 'demo/workspace', 'workspace'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(courseDir, 'questions', 'demo/workspace', 'workspace', 'starter.txt'),
+          name,
+        );
+        sessions.push(
+          owner.createSession({
+            courseDir,
+            previewSessionId: `pvs_${name}`,
+            urlPrefix: `/preview-sessions/pvs_${name}`,
+          }),
+        );
+      }
+
+      for (const session of sessions) {
+        const workspace = session.ensureWorkspace(makeSpec());
+        assert.equal(workspace.workspaceId, '1');
+        await session.requestLaunch(workspace.workspaceId);
+      }
+
+      const [firstContainer, secondContainer] = docker.containers;
+      assert.notDeepEqual(
+        firstContainer.options.HostConfig.Binds,
+        secondContainer.options.HostConfig.Binds,
+      );
+      assert.equal(
+        firstContainer.options.Labels['com.prairielearn.preview-workspace.session-id'],
+        'pvs_first',
+      );
+      assert.equal(
+        secondContainer.options.Labels['com.prairielearn.preview-workspace.session-id'],
+        'pvs_second',
+      );
+      assert.notDeepEqual(
+        firstContainer.options.NetworkingConfig,
+        secondContainer.options.NetworkingConfig,
+      );
+
+      await sessions[0].close();
+      assert.isFalse(
+        await fs.access(path.join(tempDir, 'homes', 'pvs_first')).then(
+          () => true,
+          () => false,
+        ),
+      );
+      assert.isTrue(
+        await fs.access(path.join(tempDir, 'homes', 'pvs_second')).then(
+          () => true,
+          () => false,
+        ),
+      );
+    } finally {
+      await owner.close();
+      await fs.rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('reserves global capacity across concurrent cold launches', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-workspace-owner-'));
+    const docker = new FakeDockerClient();
+    docker.images.set('workspace-image', {});
+    const owner = createPreviewWorkspaceOwner({
+      docker,
+      fetchFn: () => Promise.resolve(),
+      homeRoot: path.join(tempDir, 'homes'),
+      idleTimeoutMs: 60_000,
+      maxRunningContainers: 1,
+      pullPolicy: 'missing',
+      startTimeoutMs: 5_000,
+    });
+
+    try {
+      const launches: { session: PreviewWorkspaceManager; workspaceId: string }[] = [];
+      for (const name of ['first', 'second']) {
+        const courseDir = path.join(tempDir, name);
+        await fs.mkdir(path.join(courseDir, 'questions', 'demo/workspace', 'workspace'), {
+          recursive: true,
+        });
+        const session = owner.createSession({
+          courseDir,
+          previewSessionId: `pvs_${name}`,
+          urlPrefix: `/preview-sessions/pvs_${name}`,
+        });
+        launches.push({ session, workspaceId: session.ensureWorkspace(makeSpec()).workspaceId });
+      }
+
+      await Promise.all(
+        launches.map(({ session, workspaceId }) => session.requestLaunch(workspaceId)),
+      );
+
+      assert.equal(
+        launches.filter(
+          ({ session, workspaceId }) => session.getWorkspace(workspaceId)?.state === 'running',
+        ).length,
+        1,
+      );
+    } finally {
+      await owner.close();
+      await fs.rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('does not evict another session for a launch invalidated by close', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-workspace-owner-'));
+    const docker = new FakeDockerClient();
+    docker.images.set('workspace-image', {});
+    const owner = createPreviewWorkspaceOwner({
+      docker,
+      fetchFn: () => Promise.resolve(),
+      homeRoot: path.join(tempDir, 'homes'),
+      idleTimeoutMs: 60_000,
+      maxRunningContainers: 1,
+      pullPolicy: 'missing',
+      startTimeoutMs: 5_000,
+    });
+
+    try {
+      const sessions: PreviewWorkspaceManager[] = [];
+      for (const name of ['first', 'closing']) {
+        const courseDir = path.join(tempDir, name);
+        await fs.mkdir(path.join(courseDir, 'questions', 'demo/workspace', 'workspace'), {
+          recursive: true,
+        });
+        sessions.push(
+          owner.createSession({
+            courseDir,
+            previewSessionId: `pvs_${name}`,
+            urlPrefix: `/preview-sessions/pvs_${name}`,
+          }),
+        );
+      }
+      const first = sessions[0].ensureWorkspace(makeSpec());
+      await sessions[0].requestLaunch(first.workspaceId);
+      const closing = sessions[1].ensureWorkspace(makeSpec());
+
+      const staleLaunch = sessions[1].requestLaunch(closing.workspaceId);
+      await sessions[1].close();
+      await staleLaunch;
+
+      assert.equal(sessions[0].getWorkspace(first.workspaceId)?.state, 'running');
+    } finally {
+      await owner.close();
+      await fs.rm(tempDir, { force: true, recursive: true });
+    }
   });
 });
