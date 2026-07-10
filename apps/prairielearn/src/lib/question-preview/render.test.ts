@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { assert, describe, it } from 'vitest';
 
+import { config } from '../config.js';
+
 import { createLocalPreviewCourseSource } from './course-source.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
@@ -56,6 +58,69 @@ function parsePreviewQid(qid: string): QuestionPreviewQid {
 }
 
 describe('question preview renderer', () => {
+  it('restores process-global configuration after the engine closes', async () => {
+    const originalConfig = {
+      cacheType: config.cacheType,
+      chunksConsumer: config.chunksConsumer,
+      devMode: config.devMode,
+      ensureExecutorImageAtStartup: config.ensureExecutorImageAtStartup,
+      questionTimeoutMilliseconds: config.questionTimeoutMilliseconds,
+      reportIntervalSec: config.reportIntervalSec,
+      workersCount: config.workersCount,
+      workersExecutionMode: config.workersExecutionMode,
+    };
+    Object.assign(config, {
+      cacheType: 'memory',
+      chunksConsumer: true,
+      devMode: true,
+      ensureExecutorImageAtStartup: true,
+      questionTimeoutMilliseconds: 12_345,
+      reportIntervalSec: 30,
+      workersCount: 4,
+      workersExecutionMode: 'container',
+    });
+
+    let engine: Awaited<ReturnType<typeof createQuestionPreviewEngine>> | undefined;
+    try {
+      engine = await createQuestionPreviewEngine({
+        cacheType: 'none',
+        devMode: false,
+        questionTimeoutMilliseconds: 5000,
+        workersCount: 1,
+        workersExecutionMode: 'native',
+      });
+
+      assert.equal(config.devMode, false);
+      await engine.close();
+
+      assert.deepEqual(
+        {
+          cacheType: config.cacheType,
+          chunksConsumer: config.chunksConsumer,
+          devMode: config.devMode,
+          ensureExecutorImageAtStartup: config.ensureExecutorImageAtStartup,
+          questionTimeoutMilliseconds: config.questionTimeoutMilliseconds,
+          reportIntervalSec: config.reportIntervalSec,
+          workersCount: config.workersCount,
+          workersExecutionMode: config.workersExecutionMode,
+        },
+        {
+          cacheType: 'memory',
+          chunksConsumer: true,
+          devMode: true,
+          ensureExecutorImageAtStartup: true,
+          questionTimeoutMilliseconds: 12_345,
+          reportIntervalSec: 30,
+          workersCount: 4,
+          workersExecutionMode: 'container',
+        },
+      );
+    } finally {
+      await engine?.close();
+      Object.assign(config, originalConfig);
+    }
+  });
+
   it('renders two courses concurrently through one independently closeable engine', async () => {
     const firstCourseDir = await makeTempCourse();
     const secondCourseDir = await makeTempCourse();
