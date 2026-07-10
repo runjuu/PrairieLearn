@@ -5,6 +5,7 @@ import path from 'node:path';
 import { assert, describe, it } from 'vitest';
 
 import { createQuestionPreviewAssetResolver, makeQuestionPreviewAssetUrls } from './assets.js';
+import { createLocalPreviewCourseSource } from './course-source.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 
@@ -13,6 +14,20 @@ async function writeFile(root: string, filename: string, contents: string) {
   await fs.mkdir(path.dirname(fullPath), { recursive: true });
   await fs.writeFile(fullPath, contents);
   return fullPath;
+}
+
+async function makeCourseDir() {
+  const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-assets-course-'));
+  await fs.writeFile(
+    path.join(courseDir, 'infoCourse.json'),
+    JSON.stringify({
+      name: 'TST 101',
+      title: 'Question preview tests',
+      topics: [{ color: 'blue1', name: 'Testing' }],
+    }),
+  );
+  await fs.mkdir(path.join(courseDir, 'questions'));
+  return courseDir;
 }
 
 function parseQid(qid: string): QuestionPreviewQid {
@@ -42,25 +57,29 @@ describe('question preview assets', () => {
   });
 
   it('resolves startup course asset URLs to bounded files', async () => {
-    const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-assets-course-'));
+    const courseDir = await makeCourseDir();
 
     try {
-      const courseAsset = await writeFile(courseDir, 'clientFilesCourse/course.txt', 'course');
-      const elementAsset = await writeFile(courseDir, 'elements/widget/widget.css', 'element');
-      const extensionAsset = await writeFile(
-        courseDir,
-        'elementExtensions/pl-demo/demo.js',
-        'extension',
+      const courseAsset = await fs.realpath(
+        await writeFile(courseDir, 'clientFilesCourse/course.txt', 'course'),
       );
-      const questionAsset = await writeFile(
-        courseDir,
-        'questions/unit/files/assets/clientFilesQuestion/question.txt',
-        'question',
+      const elementAsset = await fs.realpath(
+        await writeFile(courseDir, 'elements/widget/widget.css', 'element'),
+      );
+      const extensionAsset = await fs.realpath(
+        await writeFile(courseDir, 'elementExtensions/pl-demo/demo.js', 'extension'),
+      );
+      const questionAsset = await fs.realpath(
+        await writeFile(
+          courseDir,
+          'questions/unit/files/assets/clientFilesQuestion/question.txt',
+          'question',
+        ),
       );
 
       const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' });
       const resolver = createQuestionPreviewAssetResolver({
-        courseDir,
+        courseSource: await createLocalPreviewCourseSource(courseDir),
         localPreviewGeneratedFiles,
         urlPrefix: '/preview',
       });
@@ -98,7 +117,7 @@ describe('question preview assets', () => {
   });
 
   it('resolves generated-file URLs through local preview variant identities', async () => {
-    const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-assets-course-'));
+    const courseDir = await makeCourseDir();
     const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({
       max: 1,
       urlPrefix: '/preview',
@@ -122,7 +141,7 @@ describe('question preview assets', () => {
 
     try {
       const resolver = createQuestionPreviewAssetResolver({
-        courseDir,
+        courseSource: await createLocalPreviewCourseSource(courseDir),
         localPreviewGeneratedFiles,
         urlPrefix: '/preview',
       });
@@ -150,13 +169,13 @@ describe('question preview assets', () => {
   });
 
   it('rejects unsafe or missing preview asset paths', async () => {
-    const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-assets-course-'));
+    const courseDir = await makeCourseDir();
 
     try {
       await writeFile(courseDir, 'clientFilesCourse/course.txt', 'course');
       const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' });
       const resolver = createQuestionPreviewAssetResolver({
-        courseDir,
+        courseSource: await createLocalPreviewCourseSource(courseDir),
         localPreviewGeneratedFiles,
         urlPrefix: '/preview',
       });

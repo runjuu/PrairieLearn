@@ -1,6 +1,6 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import type { LocalPreviewCourseSource } from './course-source.js';
 import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, questionPreviewQidFromPathSegments } from './qid.js';
 
@@ -57,13 +57,6 @@ export function makeQuestionPreviewAssetUrls({
   };
 }
 
-function isPathInsideRoot(root: string, filePath: string) {
-  const relativePath = path.relative(root, filePath);
-  return (
-    relativePath.length === 0 || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-  );
-}
-
 function decodeSafeUrlPathSegments(encodedPath: string) {
   if (encodedPath.length === 0) return null;
 
@@ -95,32 +88,8 @@ function decodeSafeUrlPathSegments(encodedPath: string) {
 }
 
 interface BoundedAssetRequest {
-  roots: string[];
+  rootPathSegments: string[];
   segments: string[];
-}
-
-async function resolveBoundedFile(rootInput: string, pathSegments: string[]) {
-  const root = path.resolve(rootInput);
-  const filePath = path.resolve(root, ...pathSegments);
-  if (!isPathInsideRoot(root, filePath)) return null;
-  if (!(await fs.stat(root)).isDirectory()) return null;
-  if (!(await fs.stat(filePath)).isFile()) return null;
-
-  return filePath;
-}
-
-async function resolveBoundedFileFromRoots(roots: string[], pathSegments: string[]) {
-  for (const root of roots) {
-    try {
-      const filePath = await resolveBoundedFile(root, pathSegments);
-      if (filePath !== null) return filePath;
-    } catch (err) {
-      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') continue;
-      throw err;
-    }
-  }
-
-  return null;
 }
 
 function withUrlPrefix(urlPrefix: string, pathPrefix: string) {
@@ -128,11 +97,9 @@ function withUrlPrefix(urlPrefix: string, pathPrefix: string) {
 }
 
 function startupCourseAssetRequestFromPathname({
-  courseDir,
   pathname,
   urlPrefix,
 }: {
-  courseDir: string;
   pathname: string;
   urlPrefix: string;
 }): BoundedAssetRequest | null {
@@ -147,7 +114,7 @@ function startupCourseAssetRequestFromPathname({
     if (fileSegments.length === 0) return null;
 
     return {
-      roots: [path.join(courseDir, ...route.rootPathSegments)],
+      rootPathSegments: [...route.rootPathSegments],
       segments: fileSegments,
     };
   }
@@ -166,9 +133,7 @@ function startupCourseAssetRequestFromPathname({
     if (!qidResult.ok) return null;
 
     return {
-      roots: [
-        path.join(courseDir, 'questions', ...qidResult.qid.pathSegments, 'clientFilesQuestion'),
-      ],
+      rootPathSegments: ['questions', ...qidResult.qid.pathSegments, 'clientFilesQuestion'],
       segments: fileSegments,
     };
   }
@@ -177,13 +142,13 @@ function startupCourseAssetRequestFromPathname({
 }
 
 interface CreateQuestionPreviewAssetResolverParams {
-  courseDir: string;
+  courseSource: LocalPreviewCourseSource;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   urlPrefix: string;
 }
 
 export function createQuestionPreviewAssetResolver({
-  courseDir,
+  courseSource,
   localPreviewGeneratedFiles,
   urlPrefix,
 }: CreateQuestionPreviewAssetResolverParams) {
@@ -197,13 +162,12 @@ export function createQuestionPreviewAssetResolver({
     ],
     async resolve(pathname: string) {
       const assetRequest = startupCourseAssetRequestFromPathname({
-        courseDir,
         pathname,
         urlPrefix,
       });
 
       if (assetRequest == null) return null;
-      return resolveBoundedFileFromRoots(assetRequest.roots, assetRequest.segments);
+      return courseSource.resolveFile(assetRequest.rootPathSegments, assetRequest.segments);
     },
     async resolveGeneratedFile(pathname: string) {
       return localPreviewGeneratedFiles.resolveRequest(pathname);

@@ -8,6 +8,8 @@ import path from 'node:path';
 import Docker from 'dockerode';
 import { assert, describe, it, vi } from 'vitest';
 
+import * as assets from '../assets.js';
+
 import type { QuestionPreviewDiagnostic } from './document.js';
 import { createQuestionPreviewRuntime } from './render.js';
 import { parseQuestionPreviewServerOptions, startQuestionPreviewServer } from './server.js';
@@ -49,13 +51,37 @@ function makeStubDockerClient(): PreviewWorkspaceDockerClient {
   };
 }
 
-function startTestQuestionPreviewServer({
+async function startTestQuestionPreviewServer({
   createRuntime = createQuestionPreviewRuntime,
   createWorkspaceManager = (options) =>
     createPreviewWorkspaceManager({ ...options, docker: makeStubDockerClient() }),
   ...params
 }: StartTestQuestionPreviewServerParams) {
-  return startQuestionPreviewServer({ ...params, createRuntime, createWorkspaceManager });
+  const usesFakeRuntime = createRuntime !== createQuestionPreviewRuntime;
+  if (usesFakeRuntime) await assets.init();
+
+  try {
+    const started = await startQuestionPreviewServer({
+      ...params,
+      createRuntime,
+      createWorkspaceManager,
+    });
+    if (!usesFakeRuntime) return started;
+
+    return {
+      ...started,
+      async close() {
+        try {
+          await started.close();
+        } finally {
+          await assets.close();
+        }
+      },
+    };
+  } catch (err) {
+    if (usesFakeRuntime) await assets.close();
+    throw err;
+  }
 }
 
 function makeWorkspaceSpec(overrides: Partial<PreviewWorkspaceSpec> = {}): PreviewWorkspaceSpec {
@@ -80,6 +106,14 @@ function makeWorkspaceSpec(overrides: Partial<PreviewWorkspaceSpec> = {}): Previ
 
 async function makeTempCourse() {
   const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-server-'));
+  await fs.writeFile(
+    path.join(courseDir, 'infoCourse.json'),
+    JSON.stringify({
+      name: 'TST 101',
+      title: 'Question preview tests',
+      topics: [{ color: 'blue1', name: 'Testing' }],
+    }),
+  );
   await fs.mkdir(path.join(courseDir, 'questions'), { recursive: true });
   return courseDir;
 }
@@ -410,6 +444,7 @@ describe('question preview server startup', () => {
     const defaultOptions = await parseQuestionPreviewServerOptions(['--course-dir', courseDir]);
     assert.equal(defaultOptions.host, '127.0.0.1');
     assert.equal(defaultOptions.port, 4310);
+    const canonicalCourseDir = await fs.realpath(courseDir);
 
     const started = await startTestQuestionPreviewServer({
       argv: ['--course-dir', courseDir, '--host', '127.0.0.1', '--port', '0'],
@@ -428,8 +463,8 @@ describe('question preview server startup', () => {
       assert.equal(address.address, '127.0.0.1');
       assert.equal(started.options.host, '127.0.0.1');
       assert.equal(started.options.port, 0);
-      assert.equal(started.options.courseDir, path.resolve(courseDir));
-      assert.deepEqual(events, [`runtime:${path.resolve(courseDir)}:true`, 'ready']);
+      assert.equal(started.options.courseDir, canonicalCourseDir);
+      assert.deepEqual(events, [`runtime:${canonicalCourseDir}:true`, 'ready']);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -438,6 +473,7 @@ describe('question preview server startup', () => {
 
   it('reports startup progress when a startup logger is provided', async () => {
     const courseDir = await makeTempCourse();
+    const canonicalCourseDir = await fs.realpath(courseDir);
     const logs: string[] = [];
     const startupLogger = (message: string) => logs.push(message);
     const runtimeOptions: Parameters<StartQuestionPreviewServerParams['createRuntime']>[0][] = [];
@@ -455,7 +491,7 @@ describe('question preview server startup', () => {
       assert.equal(runtimeOptions[0]?.startupLogger, startupLogger);
       assert.deepEqual(logs, [
         'Reading preview server options.',
-        `Validated course directory: ${path.resolve(courseDir)}.`,
+        `Validated course directory: ${canonicalCourseDir}.`,
         'Initializing workspace manager.',
         'Initializing preview runtime.',
         'Preparing preview asset routes.',
@@ -716,8 +752,8 @@ describe('question preview server asset routes', () => {
         started,
         '/preview-render/clientFilesCourse/linked-secret.txt',
       );
-      assert.equal(symlinkedAsset.status, 200);
-      assert.match(symlinkedAsset.body, /outside secret/);
+      assert.equal(symlinkedAsset.status, 404);
+      nodeAssert.doesNotMatch(symlinkedAsset.body, /outside secret/);
     } finally {
       await started.close();
       await fs.rm(courseDir, { force: true, recursive: true });
@@ -1594,10 +1630,11 @@ describe('question preview server direct preview route', () => {
     }
   });
 
-  it('replaces the runtime after infrastructure failures so a later refresh can render', async () => {
+  it('keeps the engine-owned runtime after infrastructure recovery so a later refresh can render', async () => {
     const courseDir = await makeTempCourse();
     const closedRuntimeIds: number[] = [];
     let runtimeCount = 0;
+    let renderCalls = 0;
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const started = await startTestQuestionPreviewServer({
@@ -1609,7 +1646,8 @@ describe('question preview server direct preview route', () => {
             closedRuntimeIds.push(runtimeId);
           },
           render: async () => {
-            if (runtimeId === 1) {
+            renderCalls++;
+            if (renderCalls === 1) {
               throw new Error('preview runtime crashed');
             }
 
@@ -1630,18 +1668,18 @@ describe('question preview server direct preview route', () => {
       assert.equal(consoleError.mock.calls.length, 1);
       assert.equal(consoleError.mock.calls[0]?.[0], 'Question preview request failed:');
       assert.include(String(consoleError.mock.calls[0]?.[1]), 'preview runtime crashed');
-      assert.deepEqual(closedRuntimeIds, [1]);
+      assert.deepEqual(closedRuntimeIds, []);
 
       const refresh = await fetch(`${baseUrl}/questions/demo/example?variant=1`);
       const refreshHtml = await refresh.text();
 
       assert.equal(refresh.status, 200);
-      assert.match(refreshHtml, /Recovered on runtime 2/);
-      assert.equal(runtimeCount, 2);
+      assert.match(refreshHtml, /Recovered on runtime 1/);
+      assert.equal(runtimeCount, 1);
     } finally {
       consoleError.mockRestore();
       await started.close();
-      assert.deepEqual(closedRuntimeIds, [1, 2]);
+      assert.deepEqual(closedRuntimeIds, [1]);
       await fs.rm(courseDir, { force: true, recursive: true });
     }
   });

@@ -2,6 +2,7 @@ import { assert, describe, it } from 'vitest';
 
 import { QuestionJsonSchema } from '../../schemas/index.js';
 
+import type { LocalPreviewCourseSource } from './course-source.js';
 import { parseQuestionPreviewQid } from './qid.js';
 import {
   makeLocalPreviewQuestionRows,
@@ -18,8 +19,24 @@ function parseQid(qid: string) {
 
 describe('local preview rows', () => {
   it('constructs synthetic Course, Question, and QuestionCaller rows from parsed question metadata', () => {
-    const { caller, course, question } = makeLocalPreviewQuestionRows({
+    const courseSource: LocalPreviewCourseSource = {
       courseDir: '/course',
+      courseMetadata: {
+        name: 'TST 101',
+        options: { questionsReceiveUserData: true },
+        timezone: 'America/Chicago',
+        title: 'Renderer-visible course',
+      },
+      readQuestionInfo: async () => {
+        throw new Error('not used by this row test');
+      },
+      readTemplateInfo: async () => {
+        throw new Error('not used by this row test');
+      },
+      resolveFile: async () => null,
+    };
+    const { caller, course, question } = makeLocalPreviewQuestionRows({
+      courseSource,
       info: QuestionJsonSchema.parse({
         externalGradingOptions: {
           entrypoint: ['python3', 'grade.py'],
@@ -42,7 +59,11 @@ describe('local preview rows', () => {
 
     assert.equal(course.id, '1');
     assert.equal(course.path, '/course');
-    assert.equal(course.short_name, 'preview-render');
+    assert.equal(course.short_name, 'TST 101');
+    assert.equal(course.title, 'Renderer-visible course');
+    assert.equal(course.display_timezone, 'America/Chicago');
+    assert.deepEqual(course.options, { questionsReceiveUserData: true });
+    assert.equal(course.questions_receive_user_data, true);
     assert.deepEqual(caller, {
       groupId: null,
       userId: null,
