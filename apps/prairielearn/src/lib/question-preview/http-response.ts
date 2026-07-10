@@ -78,6 +78,14 @@ export function mapQuestionPreviewInvalidQidResponse(): QuestionPreviewHttpActio
   });
 }
 
+export function mapLocalPreviewSessionNotFoundResponse(): QuestionPreviewHttpAction {
+  return action({
+    html: QUESTION_PREVIEW_ERROR_DOCUMENT,
+    kind: 'html',
+    status: 404,
+  });
+}
+
 export function mapQuestionPreviewInvalidSubmissionActionResponse(
   submissionAction: unknown,
 ): QuestionPreviewHttpAction {

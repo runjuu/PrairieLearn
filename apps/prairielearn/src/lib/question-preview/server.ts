@@ -32,6 +32,7 @@ import type { LocalPreviewGeneratedFiles } from './generated-files.js';
 import {
   type QuestionPreviewHttpAction,
   type QuestionPreviewHttpResponse,
+  mapLocalPreviewSessionNotFoundResponse,
   mapQuestionPreviewAssetFileResponse,
   mapQuestionPreviewDocumentResponse,
   mapQuestionPreviewGeneratedFileResponse,
@@ -908,12 +909,12 @@ export async function startQuestionPreviewServer({
   app.use('/preview-sessions/:previewSessionId', (req, res, next) => {
     const previewSessionId = req.params.previewSessionId;
     if (!hasCanonicalSessionId(req, previewSessionId)) {
-      res.status(404).end();
+      void sendQuestionPreviewHttpAction(res, mapLocalPreviewSessionNotFoundResponse()).catch(next);
       return;
     }
     const lease = catalog.acquire(previewSessionId);
     if (lease == null) {
-      res.status(404).end();
+      void sendQuestionPreviewHttpAction(res, mapLocalPreviewSessionNotFoundResponse()).catch(next);
       return;
     }
     let released = false;
