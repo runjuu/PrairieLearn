@@ -5,14 +5,24 @@ name: Publish Quesal image
 # publishes a multi-arch (amd64 + arm64) image to GHCR. Each architecture is
 # built natively on its own runner, then merged into one manifest so Docker
 # auto-selects the right arch per machine (arm64 on Apple Silicon, amd64 on an
-# x86 server). Triggered on every push to the dedicated `quesal-image` branch,
-# or manually via the Actions tab.
+# x86 server). Pushes to the dedicated `quesal-image` branch retain the rolling
+# development tags. Manual releases require an exact source commit and an
+# explicit version tag, and deliberately do not move `latest`.
 
 on:
   push:
     branches:
       - quesal-image
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Full 40-character source commit to build'
+        required: true
+        type: string
+      release_tag:
+        description: 'Versioned image tag to publish (for example preview-server-experimental-1-rc.1)'
+        required: true
+        type: string
 
 concurrency:
   group: publish-quesal-image-${{ github.ref }}
@@ -28,8 +38,38 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/prairielearn
 
 jobs:
+  prepare:
+    name: Resolve immutable source
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      source_short_sha: ${{ steps.source.outputs.short_sha }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Verify immutable source
+        id: source
+        env:
+          REQUESTED_SOURCE: ${{ inputs.source_ref || github.sha }}
+        run: |
+          if [[ ! "$REQUESTED_SOURCE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_ref must be a full lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+          source_sha=$(git rev-parse HEAD)
+          if [[ "$source_sha" != "$REQUESTED_SOURCE" ]]; then
+            echo "checked out $source_sha instead of requested source $REQUESTED_SOURCE" >&2
+            exit 1
+          fi
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${source_sha:0:7}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: [prepare]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -48,6 +88,8 @@ jobs:
           echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       # The PrairieLearn image is large; reclaim space preinstalled on the
       # runner that we don't need so the build doesn't run out of disk.
@@ -71,6 +113,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
 
       - name: Build and push by digest
         id: build
@@ -101,7 +145,7 @@ jobs:
   merge:
     name: Merge manifest and push
     runs-on: ubuntu-24.04
-    needs: [build]
+    needs: [prepare, build]
 
     steps:
       - name: Download digests
@@ -127,10 +171,11 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=ref,event=branch
-            type=sha,format=short
-            type=sha,format=long
+            type=raw,value=${{ inputs.release_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=ref,event=branch,enable=${{ github.event_name == 'push' }}
+            type=raw,value=sha-${{ needs.prepare.outputs.source_short_sha }}
+            type=raw,value=sha-${{ needs.prepare.outputs.source_sha }}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
