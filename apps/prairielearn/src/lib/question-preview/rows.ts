@@ -2,6 +2,7 @@ import type { QuestionCaller } from '../../question-servers/types.js';
 import { type QuestionJson, defaultWorkspaceOptions } from '../../schemas/index.js';
 import type { Course, Question, Submission, Variant } from '../db-types.js';
 
+import type { LocalPreviewCourseSource } from './course-source.js';
 import type { QuestionPreviewQid } from './qid.js';
 import type { PreviewWorkspaceSettings } from './workspace-registry.js';
 
@@ -18,7 +19,7 @@ export interface LocalPreviewQuestionRows {
 }
 
 interface MakeLocalPreviewQuestionRowsParams {
-  courseDir: string;
+  courseSource: LocalPreviewCourseSource;
   info: QuestionJson;
   qid: QuestionPreviewQid;
 }
@@ -57,8 +58,9 @@ function normalizeWorkspaceArgs(args: string | string[] | undefined): string | n
   return args;
 }
 
-function makeLocalPreviewCourse(courseDir: string): Course {
+function makeLocalPreviewCourse(courseSource: LocalPreviewCourseSource): Course {
   const now = new Date();
+  const { courseMetadata } = courseSource;
 
   return {
     ai_grading_free_credit_redemptions_used: 0,
@@ -69,25 +71,25 @@ function makeLocalPreviewCourse(courseDir: string): Course {
     course_instance_enrollment_limit: null,
     created_at: now,
     deleted_at: null,
-    display_timezone: 'America/Vancouver',
+    display_timezone: courseMetadata.timezone,
     draft_number: 0,
     example_course: false,
     id: PREVIEW_COURSE_ID,
     institution_id: '1',
     json_comment: null,
-    options: {},
-    path: courseDir,
-    questions_receive_user_data: false,
+    options: courseMetadata.options,
+    path: courseSource.courseDir,
+    questions_receive_user_data: courseMetadata.options.questionsReceiveUserData ?? false,
     repository: null,
     sharing_name: null,
     sharing_token: 'preview-render',
-    short_name: 'preview-render',
+    short_name: courseMetadata.name,
     show_getting_started: false,
     sync_errors: null,
     sync_job_sequence_id: null,
     sync_warnings: null,
     template_course: false,
-    title: 'Preview render course',
+    title: courseMetadata.title,
     yearly_enrollment_limit: null,
   };
 }
@@ -173,11 +175,11 @@ export function makePreviewWorkspaceSettings(info: QuestionJson): PreviewWorkspa
 }
 
 export function makeLocalPreviewQuestionRows({
-  courseDir,
+  courseSource,
   info,
   qid,
 }: MakeLocalPreviewQuestionRowsParams): LocalPreviewQuestionRows {
-  const course = makeLocalPreviewCourse(courseDir);
+  const course = makeLocalPreviewCourse(courseSource);
   const question = makeLocalPreviewQuestion(qid, info);
 
   return {

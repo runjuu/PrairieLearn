@@ -1,9 +1,11 @@
+import nodeAssert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { assert, describe, it } from 'vitest';
 
+import { type LocalPreviewCourseSource, createLocalPreviewCourseSource } from './course-source.js';
 import {
   type QuestionPreviewDocumentRenderer,
   type QuestionPreviewRenderMode,
@@ -18,7 +20,17 @@ import type { PreviewWorkspaceAllocator } from './workspace-launcher.js';
 import { LocalPreviewWorkspaces, type PreviewWorkspaceSpec } from './workspace-registry.js';
 
 async function makeTempCourse() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-document-'));
+  const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-document-'));
+  await fs.writeFile(
+    path.join(courseDir, 'infoCourse.json'),
+    JSON.stringify({
+      name: 'TST 101',
+      title: 'Question preview tests',
+      topics: [{ color: 'blue1', name: 'Testing' }],
+    }),
+  );
+  await fs.mkdir(path.join(courseDir, 'questions'));
+  return courseDir;
 }
 
 async function writeQuestionFile(
@@ -87,6 +99,7 @@ async function withInitializedDocumentRenderer<T>(
   } = {},
 ) {
   const localPreviewGeneratedFiles = new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' });
+  const courseSource = await createLocalPreviewCourseSource(courseDir);
   const runtime = await createQuestionPreviewRuntime({
     courseDir,
     localPreviewGeneratedFiles,
@@ -94,7 +107,7 @@ async function withInitializedDocumentRenderer<T>(
     workersExecutionMode: 'native',
   });
   const renderer = createQuestionPreviewDocumentRenderer({
-    courseDir,
+    courseSource,
     localPreviewGeneratedFiles,
     localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
     localPreviewWorkspaces,
@@ -163,6 +176,36 @@ function makeFakeWorkspaceAllocator(
 }
 
 describe('question preview document', () => {
+  it('propagates unexpected engine failures to the engine lifecycle', async () => {
+    const courseSource: LocalPreviewCourseSource = {
+      courseDir: '/course',
+      courseMetadata: {
+        name: 'TST 101',
+        options: {},
+        timezone: 'UTC',
+        title: 'Question preview tests',
+      },
+      readQuestionInfo: async () => {
+        throw new Error('worker-pool generation failed');
+      },
+      readTemplateInfo: async () => {
+        throw new Error('not used');
+      },
+      resolveFile: async () => null,
+    };
+    const renderer = createQuestionPreviewDocumentRenderer({
+      courseSource,
+      localPreviewGeneratedFiles: new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' }),
+      localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
+      urlPrefix: '/preview',
+    });
+
+    await nodeAssert.rejects(
+      renderer.render({ qid: parsePreviewQid('demo/question') }),
+      /worker-pool generation failed/,
+    );
+  });
+
   it('renders a complete Question preview document through the document seam', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestionInfo(courseDir, 'demo/preview', {
@@ -338,8 +381,24 @@ describe('question preview document', () => {
   });
 
   it('returns diagnostics for invalid variant seeds', async () => {
-    const renderer = createQuestionPreviewDocumentRenderer({
+    const courseSource: LocalPreviewCourseSource = {
       courseDir: '/tmp/pl-preview-render-test-course',
+      courseMetadata: {
+        name: 'TST 101',
+        options: {},
+        timezone: 'UTC',
+        title: 'Question preview tests',
+      },
+      readQuestionInfo: async () => {
+        throw new Error('question lookup should not occur for an invalid seed');
+      },
+      readTemplateInfo: async () => {
+        throw new Error('template lookup should not occur for an invalid seed');
+      },
+      resolveFile: async () => null,
+    };
+    const renderer = createQuestionPreviewDocumentRenderer({
+      courseSource,
       localPreviewGeneratedFiles: new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' }),
       localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
       urlPrefix: '/preview',

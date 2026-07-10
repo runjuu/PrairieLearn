@@ -32,10 +32,11 @@ function parsePreviewQid(qid: string): QuestionPreviewQid {
 }
 
 describe('question preview runtime lifecycle', () => {
-  it('replaces the runtime after infrastructure failures', async () => {
+  it('keeps the runtime and its course-owned stores while the engine coordinates recovery', async () => {
     const closedRuntimeIds: number[] = [];
     const runtimeOptions: Parameters<QuestionPreviewRuntimeFactory>[0][] = [];
     let runtimeCount = 0;
+    let renderCalls = 0;
 
     const createRuntime: QuestionPreviewRuntimeFactory = async (options) => {
       runtimeOptions.push(options);
@@ -45,7 +46,8 @@ describe('question preview runtime lifecycle', () => {
           closedRuntimeIds.push(runtimeId);
         },
         render: async () => {
-          if (runtimeId === 1) {
+          renderCalls++;
+          if (renderCalls === 1) {
             throw new Error('preview runtime crashed');
           }
 
@@ -63,7 +65,7 @@ describe('question preview runtime lifecycle', () => {
       () => lifecycle.render({ qid: parsePreviewQid('demo/example'), variantSeed: '1' }),
       /preview runtime crashed/,
     );
-    assert.deepEqual(closedRuntimeIds, [1]);
+    assert.deepEqual(closedRuntimeIds, []);
     assert.equal(
       runtimeOptions[0]?.localPreviewGeneratedFiles,
       lifecycle.localPreviewGeneratedFiles,
@@ -77,20 +79,15 @@ describe('question preview runtime lifecycle', () => {
     });
 
     assert.equal(recovered.ok, true);
-    assert.match(recovered.documentHtml, /Recovered on runtime 2/);
-    assert.equal(runtimeCount, 2);
-    assert.equal(
-      runtimeOptions[1]?.localPreviewGeneratedFiles,
-      lifecycle.localPreviewGeneratedFiles,
-    );
-    assert.equal(runtimeOptions[1]?.urlPrefix, lifecycle.urlPrefix);
+    assert.match(recovered.documentHtml, /Recovered on runtime 1/);
+    assert.equal(runtimeCount, 1);
     assert.equal(
       lifecycle.localPreviewGeneratedFiles.routePattern,
       `${lifecycle.urlPrefix}/generatedFilesQuestion/variant/*`,
     );
 
     await lifecycle.close();
-    assert.deepEqual(closedRuntimeIds, [1, 2]);
+    assert.deepEqual(closedRuntimeIds, [1]);
   });
 
   it('keeps the runtime after expected render failures', async () => {

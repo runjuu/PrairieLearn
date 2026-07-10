@@ -1,5 +1,3 @@
-import path from 'node:path';
-
 import { cache } from '@prairielearn/cache';
 
 import * as freeformServer from '../../question-servers/freeform.js';
@@ -8,14 +6,19 @@ import * as codeCaller from '../code-caller/index.js';
 import { config } from '../config.js';
 import * as load from '../load.js';
 
+import { type LocalPreviewCourseSource, createLocalPreviewCourseSource } from './course-source.js';
 import {
   type QuestionPreviewDocumentInput,
-  type QuestionPreviewDocumentRenderer,
   type QuestionPreviewDocumentResult,
   type QuestionPreviewRenderMode,
   createQuestionPreviewDocumentRenderer,
   makeQuestionPreviewDocumentFailureResult,
 } from './document.js';
+import {
+  type QuestionPreviewCourseRenderer,
+  type QuestionPreviewEngineLifecycle,
+  createQuestionPreviewEngineLifecycle,
+} from './engine.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { parseQuestionPreviewQid } from './qid.js';
 import { LocalPreviewSubmissionFiles } from './submission-files.js';
@@ -27,25 +30,32 @@ export type QuestionPreviewWorkersExecutionMode = 'native' | 'container';
 export type QuestionPreviewCacheType = 'memory' | 'none' | 'redis';
 export type QuestionPreviewStartupLogger = (message: string) => void;
 
-export interface QuestionPreviewRuntimeStartupOptions {
+export interface QuestionPreviewEngineStartupOptions {
   cacheType?: QuestionPreviewCacheType;
-  courseDir: string;
   devMode?: boolean;
-  localPreviewGeneratedFiles?: LocalPreviewGeneratedFiles;
-  localPreviewSubmissionFiles?: LocalPreviewSubmissionFiles;
-  localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
-  renderMode?: QuestionPreviewRenderMode;
   startupLogger?: QuestionPreviewStartupLogger;
-  urlPrefix?: string;
   workersCount?: number;
   workersExecutionMode?: QuestionPreviewWorkersExecutionMode;
 }
 
+export interface QuestionPreviewRuntimeStartupOptions extends QuestionPreviewEngineStartupOptions {
+  courseDir: string;
+  courseSource?: LocalPreviewCourseSource;
+  localPreviewGeneratedFiles?: LocalPreviewGeneratedFiles;
+  localPreviewSubmissionFiles?: LocalPreviewSubmissionFiles;
+  localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
+  renderMode?: QuestionPreviewRenderMode;
+  urlPrefix?: string;
+}
+
 export interface QuestionPreviewInput extends Omit<
   QuestionPreviewRuntimeStartupOptions,
-  'localPreviewGeneratedFiles' | 'localPreviewSubmissionFiles' | 'localPreviewWorkspaces'
+  | 'courseSource'
+  | 'localPreviewGeneratedFiles'
+  | 'localPreviewSubmissionFiles'
+  | 'localPreviewWorkspaces'
 > {
   qid: string;
   variantSeed?: string;
@@ -126,29 +136,67 @@ class InitializedQuestionPreviewRuntime implements QuestionPreviewRuntime {
   private closePromise: Promise<void> | null = null;
   private closed = false;
 
-  constructor(private readonly documentRenderer: QuestionPreviewDocumentRenderer) {}
+  constructor(
+    private readonly engine: QuestionPreviewEngineLifecycle,
+    private readonly courseRenderer: QuestionPreviewCourseRenderer,
+  ) {}
 
   async render(input: QuestionPreviewDocumentInput): Promise<QuestionPreviewDocumentResult> {
     if (this.closed) {
       throw new Error('Question preview runtime is already closed.');
     }
 
-    return this.documentRenderer.render(input);
+    return this.courseRenderer.render(input);
   }
 
   async close(): Promise<void> {
     if (!this.closePromise) {
       this.closed = true;
-      this.closePromise = closePrairieLearnForQuestionPreview();
+      this.closePromise = (async () => {
+        await this.courseRenderer.close();
+        await this.engine.close();
+      })();
     }
 
     return this.closePromise;
   }
 }
 
+export async function createQuestionPreviewEngine({
+  cacheType = 'none',
+  devMode = false,
+  prewarmWorkers = false,
+  questionTimeoutMilliseconds = 5000,
+  startupLogger,
+  workersCount = 1,
+  workersExecutionMode = 'container',
+}: QuestionPreviewEngineStartupOptions): Promise<QuestionPreviewEngineLifecycle> {
+  validateQuestionPreviewWorkersExecutionMode(workersExecutionMode);
+
+  return createQuestionPreviewEngineLifecycle({
+    createGeneration: async () => {
+      await initPrairieLearnForQuestionPreview({
+        cacheType,
+        devMode,
+        mode: workersExecutionMode,
+        prewarmWorkers,
+        questionTimeoutMilliseconds,
+        startupLogger,
+        workersCount,
+      });
+
+      return {
+        close: closePrairieLearnForQuestionPreview,
+        render: (options, input) => createQuestionPreviewDocumentRenderer(options).render(input),
+      };
+    },
+  });
+}
+
 export async function createQuestionPreviewRuntime({
   cacheType = 'none',
   courseDir,
+  courseSource,
   devMode = false,
   localPreviewGeneratedFiles,
   localPreviewSubmissionFiles,
@@ -162,14 +210,15 @@ export async function createQuestionPreviewRuntime({
   workersExecutionMode = 'container',
 }: QuestionPreviewRuntimeStartupOptions): Promise<QuestionPreviewRuntime> {
   validateQuestionPreviewWorkersExecutionMode(workersExecutionMode);
-  await initPrairieLearnForQuestionPreview({
+  const runtimeCourseSource = courseSource ?? (await createLocalPreviewCourseSource(courseDir));
+  const engine = await createQuestionPreviewEngine({
     cacheType,
     devMode,
-    mode: workersExecutionMode,
     prewarmWorkers,
     questionTimeoutMilliseconds,
     startupLogger,
     workersCount,
+    workersExecutionMode,
   });
 
   startupLogger?.('Preparing question preview renderer.');
@@ -177,8 +226,8 @@ export async function createQuestionPreviewRuntime({
     localPreviewGeneratedFiles ?? new LocalPreviewGeneratedFiles({ urlPrefix });
   const runtimeLocalPreviewSubmissionFiles =
     localPreviewSubmissionFiles ?? new LocalPreviewSubmissionFiles({ urlPrefix });
-  const documentRenderer = createQuestionPreviewDocumentRenderer({
-    courseDir: path.resolve(courseDir),
+  const courseRenderer = engine.createCourseRenderer({
+    courseSource: runtimeCourseSource,
     localPreviewGeneratedFiles: runtimeLocalPreviewGeneratedFiles,
     localPreviewSubmissionFiles: runtimeLocalPreviewSubmissionFiles,
     localPreviewWorkspaces,
@@ -187,7 +236,7 @@ export async function createQuestionPreviewRuntime({
   });
   startupLogger?.('Question preview renderer initialized.');
 
-  return new InitializedQuestionPreviewRuntime(documentRenderer);
+  return new InitializedQuestionPreviewRuntime(engine, courseRenderer);
 }
 
 export async function renderQuestionPreview(

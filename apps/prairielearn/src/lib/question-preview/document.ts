@@ -1,6 +1,3 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-
 import fg from 'fast-glob';
 
 import { html, unsafeHtml } from '@prairielearn/html';
@@ -13,11 +10,11 @@ import { QuestionTitle } from '../../components/QuestionContainer.js';
 import { QuestionHeadContents } from '../../components/QuestionHeadContents.js';
 import { type SubmissionForRender, SubmissionPanel } from '../../components/SubmissionPanel.js';
 import * as questionServers from '../../question-servers/index.js';
-import { type QuestionJson, QuestionJsonSchema } from '../../schemas/index.js';
 import { config } from '../config.js';
 import type { Course, Question, Submission, Variant } from '../db-types.js';
 
 import { makeQuestionPreviewAssetUrls } from './assets.js';
+import type { LocalPreviewCourseSource } from './course-source.js';
 import { type LocalPreviewGeneratedFiles } from './generated-files.js';
 import type { QuestionPreviewQid } from './qid.js';
 import {
@@ -49,7 +46,7 @@ export interface QuestionPreviewDocumentRenderer {
 export type QuestionPreviewRenderMode = 'full' | 'question-only';
 
 export interface QuestionPreviewDocumentRendererOptions {
-  courseDir: string;
+  courseSource: LocalPreviewCourseSource;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces?: PreviewWorkspaceAllocator | null;
@@ -92,7 +89,7 @@ export type QuestionPreviewDocumentResult =
   | QuestionPreviewDocumentSuccess;
 
 interface QuestionPreviewInternalRenderInput extends QuestionPreviewDocumentInput {
-  courseDir: string;
+  courseSource: LocalPreviewCourseSource;
   localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
@@ -102,6 +99,7 @@ interface QuestionPreviewInternalRenderInput extends QuestionPreviewDocumentInpu
 
 class ExpectedQuestionPreviewError extends Error {
   data?: unknown;
+  expectedQuestionPreviewFailure = true;
   fatal = true;
   phase: QuestionPreviewPhase;
 
@@ -187,15 +185,15 @@ function sanitizeDiagnosticValue(value: unknown, sanitizePaths: string[]): unkno
 
 function diagnosticFromError(
   err: unknown,
-  { phase }: { phase: QuestionPreviewPhase },
+  { phase, sanitizePaths = [] }: { phase: QuestionPreviewPhase; sanitizePaths?: string[] },
 ): QuestionPreviewDiagnostic {
   if (err instanceof Error) {
     const errorPhase = 'phase' in err && isQuestionPreviewPhase(err.phase) ? err.phase : phase;
 
     return {
-      data: 'data' in err ? err.data : undefined,
+      data: 'data' in err ? sanitizeDiagnosticValue(err.data, sanitizePaths) : undefined,
       fatal: 'fatal' in err && typeof err.fatal === 'boolean' ? err.fatal : true,
-      message: err.message,
+      message: sanitizeDiagnosticText(err.message, sanitizePaths),
       name: err.name,
       phase: errorPhase,
     };
@@ -218,6 +216,15 @@ function isQuestionPreviewPhase(value: unknown): value is QuestionPreviewPhase {
     value === 'parse' ||
     value === 'grade' ||
     value === 'render'
+  );
+}
+
+function isExpectedQuestionPreviewFailure(err: unknown) {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'expectedQuestionPreviewFailure' in err &&
+    err.expectedQuestionPreviewFailure === true
   );
 }
 
@@ -461,50 +468,6 @@ function validateQuestionPreviewVariantSeed(variantSeed: string) {
   }
 }
 
-async function readQuestionInfo(courseDir: string, qid: QuestionPreviewQid): Promise<QuestionJson> {
-  const infoPath = path.join(courseDir, 'questions', ...qid.pathSegments, 'info.json');
-  let contents: string;
-
-  try {
-    contents = await fs.readFile(infoPath, 'utf8');
-  } catch (err) {
-    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
-      throw new ExpectedQuestionPreviewError(`Question "${qid.decoded}" is missing info.json.`, {
-        data: { qid: qid.decoded },
-        phase: 'metadata',
-      });
-    }
-
-    throw err;
-  }
-
-  let rawInfo: unknown;
-  try {
-    rawInfo = JSON.parse(contents);
-  } catch {
-    throw new ExpectedQuestionPreviewError(
-      `Question "${qid.decoded}" has invalid info.json JSON.`,
-      {
-        data: { qid: qid.decoded },
-        phase: 'metadata',
-      },
-    );
-  }
-
-  const parsed = QuestionJsonSchema.safeParse(rawInfo);
-  if (!parsed.success) {
-    throw new ExpectedQuestionPreviewError(
-      `Question "${qid.decoded}" has invalid info.json metadata.`,
-      {
-        data: { issues: parsed.error.issues, qid: qid.decoded },
-        phase: 'metadata',
-      },
-    );
-  }
-
-  return parsed.data;
-}
-
 function previewSubmittedFiles(
   submittedAnswer: Record<string, unknown> | null,
 ): PreviewSubmittedFile[] {
@@ -524,7 +487,7 @@ function previewSubmittedFiles(
 }
 
 async function renderQuestionPreviewDocumentResult({
-  courseDir,
+  courseSource,
   localPreviewGeneratedFiles,
   localPreviewSubmissionFiles,
   localPreviewWorkspaces,
@@ -549,9 +512,9 @@ async function renderQuestionPreviewDocumentResult({
     validateQuestionPreviewVariantSeed(variantSeed);
 
     phase = 'metadata';
-    const info = await readQuestionInfo(courseDir, qid);
+    const info = await courseSource.readQuestionInfo(qid);
     const { caller, course, question } = makeLocalPreviewQuestionRows({
-      courseDir,
+      courseSource,
       info,
       qid,
     });
@@ -578,7 +541,7 @@ async function renderQuestionPreviewDocumentResult({
       caller,
     );
     const generateIssues = generateResult.courseIssues;
-    const sanitizePaths = [courseDir];
+    const sanitizePaths = [courseSource.courseDir];
     const generateDiagnostics = diagnosticsFromIssues(generateIssues, 'generate', {
       sanitizePaths,
     });
@@ -880,24 +843,25 @@ async function renderQuestionPreviewDocumentResult({
       headHtml: shellHeadHtml,
     });
   } catch (err) {
-    return makeQuestionPreviewDocumentFailureResult([diagnosticFromError(err, { phase })]);
+    if (!isExpectedQuestionPreviewFailure(err)) throw err;
+    return makeQuestionPreviewDocumentFailureResult([
+      diagnosticFromError(err, { phase, sanitizePaths: [courseSource.courseDir] }),
+    ]);
   }
 }
 
 export function createQuestionPreviewDocumentRenderer({
-  courseDir,
+  courseSource,
   localPreviewGeneratedFiles,
   localPreviewSubmissionFiles,
   localPreviewWorkspaces = null,
   renderMode = 'full',
   urlPrefix,
 }: QuestionPreviewDocumentRendererOptions): QuestionPreviewDocumentRenderer {
-  const resolvedCourseDir = path.resolve(courseDir);
-
   return {
     render(input) {
       return renderQuestionPreviewDocumentResult({
-        courseDir: resolvedCourseDir,
+        courseSource,
         localPreviewGeneratedFiles,
         localPreviewSubmissionFiles,
         localPreviewWorkspaces,

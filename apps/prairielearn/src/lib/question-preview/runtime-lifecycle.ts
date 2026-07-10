@@ -1,3 +1,4 @@
+import type { LocalPreviewCourseSource } from './course-source.js';
 import type { QuestionPreviewDocumentInput, QuestionPreviewRenderMode } from './document.js';
 import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import type {
@@ -19,6 +20,7 @@ export type QuestionPreviewRuntimeFactory = (
 export interface QuestionPreviewRuntimeLifecycleStartupOptions {
   cacheType?: QuestionPreviewCacheType;
   courseDir: string;
+  courseSource?: LocalPreviewCourseSource;
   devMode?: boolean;
   prewarmWorkers?: boolean;
   questionTimeoutMilliseconds?: number;
@@ -65,88 +67,40 @@ function makeRuntimeStartupOptions({
   };
 }
 
-/**
- * Wraps a preview runtime so infrastructure failures discard the current
- * runtime and allow a later request to create a fresh one.
- */
-class ReplaceableQuestionPreviewRuntime implements QuestionPreviewRuntimeLifecycle {
-  private currentRuntime: QuestionPreviewRuntime | null;
-  private nextRuntimePromise: Promise<QuestionPreviewRuntime> | null = null;
-  private readonly createRuntime: QuestionPreviewRuntimeFactory;
-  private readonly runtimeOptions: QuestionPreviewRuntimeStartupOptions;
+class OwnedQuestionPreviewRuntime implements QuestionPreviewRuntimeLifecycle {
   readonly localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
   readonly localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
   readonly localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
   readonly urlPrefix: string;
 
   constructor({
-    createRuntime,
-    initialRuntime,
     localPreviewGeneratedFiles,
     localPreviewSubmissionFiles,
     localPreviewWorkspaces,
-    runtimeOptions,
+    runtime,
     urlPrefix,
   }: {
-    createRuntime: QuestionPreviewRuntimeFactory;
-    initialRuntime: QuestionPreviewRuntime;
     localPreviewGeneratedFiles: LocalPreviewGeneratedFiles;
     localPreviewSubmissionFiles: LocalPreviewSubmissionFiles;
     localPreviewWorkspaces: PreviewWorkspaceAllocator | null;
-    runtimeOptions: QuestionPreviewRuntimeStartupOptions;
+    runtime: QuestionPreviewRuntime;
     urlPrefix: string;
   }) {
-    this.createRuntime = createRuntime;
-    this.runtimeOptions = runtimeOptions;
     this.localPreviewGeneratedFiles = localPreviewGeneratedFiles;
     this.localPreviewSubmissionFiles = localPreviewSubmissionFiles;
     this.localPreviewWorkspaces = localPreviewWorkspaces;
     this.urlPrefix = urlPrefix;
-    this.currentRuntime = initialRuntime;
+    this.runtime = runtime;
   }
 
-  private async getRuntime() {
-    if (this.currentRuntime != null) return this.currentRuntime;
-
-    this.nextRuntimePromise ??= this.createRuntime(this.runtimeOptions).finally(() => {
-      this.nextRuntimePromise = null;
-    });
-    this.currentRuntime = await this.nextRuntimePromise;
-    return this.currentRuntime;
-  }
-
-  private async discardRuntime(runtime: QuestionPreviewRuntime) {
-    if (this.currentRuntime !== runtime) return;
-    this.currentRuntime = null;
-
-    try {
-      await runtime.close();
-    } catch {
-      // The runtime has already failed. A close failure should not prevent
-      // the request from reporting the original infrastructure failure.
-    }
-  }
+  private readonly runtime: QuestionPreviewRuntime;
 
   async render(input: QuestionPreviewDocumentInput) {
-    const runtime = await this.getRuntime();
-
-    try {
-      return await runtime.render(input);
-    } catch (err) {
-      await this.discardRuntime(runtime);
-      throw err;
-    }
+    return this.runtime.render(input);
   }
 
   async close() {
-    const pendingRuntime = this.nextRuntimePromise;
-    if (pendingRuntime != null) {
-      await pendingRuntime.catch(() => null);
-    }
-
-    const runtime = this.currentRuntime;
-    this.currentRuntime = null;
-    await runtime?.close();
+    await this.runtime.close();
   }
 }
 
@@ -171,13 +125,11 @@ export async function createQuestionPreviewRuntimeLifecycle({
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
   });
 
-  return new ReplaceableQuestionPreviewRuntime({
-    createRuntime,
-    initialRuntime: await createRuntime(runtimeStartupOptions),
+  return new OwnedQuestionPreviewRuntime({
     localPreviewGeneratedFiles,
     localPreviewSubmissionFiles,
     localPreviewWorkspaces,
-    runtimeOptions: runtimeStartupOptions,
+    runtime: await createRuntime(runtimeStartupOptions),
     urlPrefix: QUESTION_PREVIEW_URL_PREFIX,
   });
 }

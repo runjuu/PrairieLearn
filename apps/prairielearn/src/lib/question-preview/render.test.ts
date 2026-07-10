@@ -4,11 +4,28 @@ import path from 'node:path';
 
 import { assert, describe, it } from 'vitest';
 
+import { createLocalPreviewCourseSource } from './course-source.js';
+import { LocalPreviewGeneratedFiles } from './generated-files.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
-import { createQuestionPreviewRuntime, renderQuestionPreview } from './render.js';
+import {
+  createQuestionPreviewEngine,
+  createQuestionPreviewRuntime,
+  renderQuestionPreview,
+} from './render.js';
+import { LocalPreviewSubmissionFiles } from './submission-files.js';
 
 async function makeTempCourse() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-render-'));
+  const courseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-render-'));
+  await fs.writeFile(
+    path.join(courseDir, 'infoCourse.json'),
+    JSON.stringify({
+      name: 'TST 101',
+      title: 'Question preview tests',
+      topics: [{ color: 'blue1', name: 'Testing' }],
+    }),
+  );
+  await fs.mkdir(path.join(courseDir, 'questions'));
+  return courseDir;
 }
 
 async function writeQuestionFile(
@@ -39,6 +56,74 @@ function parsePreviewQid(qid: string): QuestionPreviewQid {
 }
 
 describe('question preview renderer', () => {
+  it('renders two courses concurrently through one independently closeable engine', async () => {
+    const firstCourseDir = await makeTempCourse();
+    const secondCourseDir = await makeTempCourse();
+    await writeQuestionInfo(firstCourseDir, 'demo/shared', {
+      title: 'First course question',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111170',
+    });
+    await writeQuestionFile(
+      firstCourseDir,
+      'demo/shared',
+      'question.html',
+      '<p>First course body</p>',
+    );
+    await writeQuestionInfo(secondCourseDir, 'demo/shared', {
+      title: 'Second course question',
+      topic: 'Testing',
+      type: 'v3',
+      uuid: '11111111-1111-4111-8111-111111111171',
+    });
+    await writeQuestionFile(
+      secondCourseDir,
+      'demo/shared',
+      'question.html',
+      '<p>Second course body</p>',
+    );
+    const startupLogs: string[] = [];
+    const engine = await createQuestionPreviewEngine({
+      startupLogger: (message) => startupLogs.push(message),
+      workersCount: 2,
+      workersExecutionMode: 'native',
+    });
+    const makeRenderer = async (courseDir: string) =>
+      engine.createCourseRenderer({
+        courseSource: await createLocalPreviewCourseSource(courseDir),
+        localPreviewGeneratedFiles: new LocalPreviewGeneratedFiles({ urlPrefix: '/preview' }),
+        localPreviewSubmissionFiles: new LocalPreviewSubmissionFiles({ urlPrefix: '/preview' }),
+        urlPrefix: '/preview',
+      });
+    const firstRenderer = await makeRenderer(firstCourseDir);
+    const secondRenderer = await makeRenderer(secondCourseDir);
+    const qid = parsePreviewQid('demo/shared');
+
+    try {
+      const [first, second] = await Promise.all([
+        firstRenderer.render({ qid }),
+        secondRenderer.render({ qid }),
+      ]);
+      assert.match(first.documentHtml, /First course body/);
+      assert.match(second.documentHtml, /Second course body/);
+      assert.equal(
+        startupLogs.filter((message) => message === 'PrairieLearn runtime initialized.').length,
+        1,
+      );
+
+      await firstRenderer.close();
+      const secondAfterFirstClosed = await secondRenderer.render({ qid });
+      assert.match(secondAfterFirstClosed.documentHtml, /Second course body/);
+    } finally {
+      await firstRenderer.close();
+      await secondRenderer.close();
+      await engine.close();
+      await fs.rm(firstCourseDir, { force: true, recursive: true });
+      await fs.rm(secondCourseDir, { force: true, recursive: true });
+    }
+  });
+
   it('renders valid raw qids through one-shot runtime startup', async () => {
     const courseDir = await makeTempCourse();
     await writeQuestionInfo(courseDir, 'demo/preview', {
