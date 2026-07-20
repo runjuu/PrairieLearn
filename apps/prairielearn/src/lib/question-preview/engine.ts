@@ -4,7 +4,7 @@ import type {
   QuestionPreviewDocumentResult,
 } from './document.js';
 
-export interface QuestionPreviewEngineGeneration {
+interface QuestionPreviewEngineGeneration {
   close(): Promise<void>;
   render(
     options: QuestionPreviewDocumentRendererOptions,

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { APP_ROOT_PATH } from './paths.js';
 
 const DEFAULT_LEGACY_QUESTION_FILES_PATH = path.resolve(APP_ROOT_PATH, 'v2-question-servers');
-export const MAX_LEGACY_QUESTION_TEMPLATE_DEPTH = 10;
+const MAX_LEGACY_QUESTION_TEMPLATE_DEPTH = 10;
 
 export interface LegacyQuestionFileQuestion {
   courseId: string;

@@ -9,7 +9,7 @@ export interface LocalPreviewSessionDescriptor {
   previewSessionId: string;
 }
 
-export interface LocalPreviewSessionOwnedState {
+interface LocalPreviewSessionOwnedState {
   beginClose?(): Promise<void> | void;
   close(): Promise<void>;
   courseDir: string;
