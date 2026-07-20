@@ -13,7 +13,7 @@ import { resolveLegacyQuestionFilePath } from '../legacy-question-file.js';
 import { ExpectedQuestionPreviewError } from './expected-error.js';
 import { type QuestionPreviewQid, parseQuestionPreviewQid } from './qid.js';
 
-export interface LocalPreviewCourseMetadata {
+interface LocalPreviewCourseMetadata {
   name: string;
   options: CourseJson['options'];
   timezone: string;

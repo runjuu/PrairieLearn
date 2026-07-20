@@ -135,7 +135,7 @@ export type PreviewWorkspaceOwnerOptions = Omit<
   'courseDir' | 'urlPrefix'
 >;
 
-export interface PreviewWorkspaceSessionOptions {
+interface PreviewWorkspaceSessionOptions {
   courseDir: string;
   previewSessionId: string;
   urlPrefix: string;

@@ -245,4 +245,4 @@ export async function withCodeCaller<T>(
   }
 }
 
-export { CodeCallerPoolUnavailableError, FunctionMissingError, type CodeCaller };
+export { FunctionMissingError, type CodeCaller };
